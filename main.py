@@ -85,12 +85,14 @@ async def my_codes(client, message):
             await message.reply("📭 你没有保存任何文件")
             return
 
-        text = "📁 你的提取码：\n"
-        for code, file_type in rows:
-            text += f"- `{code}` ({file_type})\n"
-        await message.reply(text)
     except Exception as e:
         await message.reply(f"❌ 查询失败：{str(e)}")
+        return
+
+    text = "📁 你的提取码：\n"
+    for code, file_type in rows:
+        text += f"- `{code}` ({file_type})\n"
+    await message.reply(text)
 
 @app.on_message(filters.command("delcode"))
 async def del_code(client, message):
@@ -136,14 +138,16 @@ async def all_codes(client, message):
             await message.reply("📭 数据库中没有任何文件")
             return
 
-        text = "📊 所有文件：\n"
-        for code, user_id, file_type in rows:
-            text += f"- `{code}` | 用户: {user_id} | 类型: {file_type}\n"
-        await message.reply(text)
     except Exception as e:
         await message.reply(f"❌ 查询失败：{str(e)}")
+        return
 
-@app.on_message(filters.text & ~filters.command)
+    text = "📊 所有文件：\n"
+    for code, user_id, file_type in rows:
+        text += f"- `{code}` | 用户: {user_id} | 类型: {file_type}\n"
+    await message.reply(text)
+
+@app.on_message(filters.text & ~filters.command(["start", "mycodes", "delcode", "allcodes"]))
 async def get_file(client, message):
     code = message.text.strip()
     try:
