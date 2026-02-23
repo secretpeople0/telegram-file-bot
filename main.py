@@ -43,9 +43,9 @@ async def handle_media_group(client, message: Message):
     await asyncio.sleep(1)
 
     if len(pending_album[gid]["msgs"]) == message.media_group_count:
-        await process_album(gid)
+        await process_album(client, gid)
 
-async def process_album(gid):
+async def process_album(client, gid):
     data = pending_album.pop(gid)
     msgs = data["msgs"]
     uid = data["user_id"]
@@ -76,7 +76,7 @@ async def handle_single_media(client, message: Message):
         "files": [path],
     }))
 
-    await message.reply(f"✅ 保存成功！\n提取码：`{code}`\n使用 /get {code} 提取")
+    await message.reply(f"✅ 保存成功！\n提取码：`{code}`\n使用 /get {code} 提取文件")
 
 # 提取文件
 @app.on_message(filters.command("get"))
@@ -96,7 +96,7 @@ async def get_file(client, message: Message):
     uid = message.from_user.id if message.from_user else 0
 
     if info["user_id"] != uid:
-        await message.reply("❌ 你没有权限")
+        await message.reply("❌ 你没有权限提取这个文件")
         return
 
     files = info["files"]
@@ -113,7 +113,7 @@ async def get_file(client, message: Message):
         await message.reply_document(z, caption=f"✅ 批量提取：共 {len(files)} 个文件")
 
 @app.on_message(filters.command("start"))
-async def start(message):
+async def start(client, message: Message):
     await message.reply("✅ 发送文件/图片，自动生成提取码\n多张图片 = 一个提取码")
 
 if __name__ == "__main__":
