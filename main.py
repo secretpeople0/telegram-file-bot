@@ -9,8 +9,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
-    filters,
-    ConversationHandler
+    filters
 )
 
 # ====================== 配置区 ======================
@@ -237,23 +236,22 @@ async def retrieve_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ====================== 主程序 ======================
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    if not BOT_TOKEN:
+        raise ValueError("TELEGRAM_BOT_TOKEN 环境变量未设置")
 
-    # 基础命令
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("confirm", confirm_package))
-    app.add_handler(CommandHandler("admin", admin_panel))
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # 消息处理
-    app.add_handler(MessageHandler(filters.ATTACHMENT, collect_files))  # 接收文件
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, retrieve_files))  # 提取码取文件
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text))  # 管理员文本操作
+    # 注册所有处理器
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("confirm", confirm_package))
+    application.add_handler(CommandHandler("admin", admin_panel))
+    application.add_handler(MessageHandler(filters.ATTACHMENT, collect_files))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, retrieve_files))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text))
+    application.add_handler(CallbackQueryHandler(admin_callback))
 
-    # 回调处理
-    app.add_handler(CallbackQueryHandler(admin_callback))
-
-    # 启动机器人
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # 启动轮询
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
