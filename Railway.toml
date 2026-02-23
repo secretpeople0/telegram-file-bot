@@ -1,6 +1,0 @@
-[build]
-builder = "NIXPACKS"
-[nixpacks.envs]
-PYTHON_VERSION = "3.11"
-[nixpacks.packages]
-system = ["libpq"]
