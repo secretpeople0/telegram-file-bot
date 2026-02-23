@@ -16,16 +16,15 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
 
-# 持久化存储文件
 STORAGE_FILE = "database.json"
 BAN_FILE = "banned_users.json"
 
-# 临时会话存储（用户上传中但未确认的文件）
 user_sessions = {}
-# 等待命名的会话（用户刚打包完，等待输入名称）
-pending_naming = {}
+pending_naming = {}  # 正在命名的用户
+db = {}
+banned_users = []
 
-# ====================== 数据模型 ======================
+# ====================== 数据库 ======================
 def init_db():
     if not os.path.exists(STORAGE_FILE):
         with open(STORAGE_FILE, "w", encoding="utf-8") as f:
@@ -51,7 +50,7 @@ def save_banned():
     with open(BAN_FILE, "w", encoding="utf-8") as f:
         json.dump(banned_users, f, ensure_ascii=False, indent=2)
 
-# ====================== 封禁检查装饰器 ======================
+# ====================== 封禁检查 ======================
 def check_ban(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -61,7 +60,7 @@ def check_ban(func):
         return await func(update, context)
     return wrapper
 
-# ====================== 管理员功能 ======================
+# ====================== 管理员 ======================
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID:
@@ -75,10 +74,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🚫 封禁/解封用户", callback_data="admin_ban")],
         [InlineKeyboardButton("👤 查看上传者详情", callback_data="admin_view_uploader")],
     ]
-    await update.message.reply_text(
-        "👮 管理员控制面板",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await update.message.reply_text("👮 管理员控制面板", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -91,11 +87,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "admin_stats":
         total_packages = len(db)
         total_files = sum(len(pkg["files"]) for pkg in db.values())
-        await query.edit_message_text(
-            f"📊 存储统计\n"
-            f"打包总数：{total_packages} 个\n"
-            f"文件总数：{total_files} 个"
-        )
+        await query.edit_message_text(f"📊 存储统计\n打包总数：{total_packages} 个\n文件总数：{total_files} 个")
 
     elif query.data == "admin_search":
         await query.edit_message_text("🔍 请回复你要搜索的文件名关键词：")
@@ -126,228 +118,145 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for code, pkg in db.items():
             for f in pkg["files"]:
                 if text.lower() in f["name"].lower():
-                    results.append(
-                        f"🔑 提取码：`{code}`\n"
-                        f"📦 包名：`{pkg.get('name', '未命名')}`\n"
-                        f"📄 匹配文件：`{f['name']}`\n"
-                        f"👤 上传者：{pkg['uploader']['name']} (ID: {pkg['uploader']['id']})\n"
-                        f"⏰ 上传时间：{pkg['time']}\n"
-                    )
-        if results:
-            await update.message.reply_text(
-                f"✅ 找到 {len(results)} 个匹配结果：\n\n" + "\n".join(results),
-                parse_mode="Markdown"
-            )
-        else:
-            await update.message.reply_text("❌ 未找到匹配文件")
+                    results.append(f"🔑 提取码：`{code}`\n📦 包名：`{pkg.get('name', '未命名')}`\n📄 文件：`{f['name']}`\n👤 {pkg['uploader']['name']}\n⏰ {pkg['time']}\n")
+        await update.message.reply_text(f"✅ 找到 {len(results)} 条结果\n\n" + "\n".join(results) if results else "❌ 无结果", parse_mode="Markdown")
 
     elif action == "delete":
         if text in db:
             del db[text]
             save_db()
-            await update.message.reply_text(f"✅ 提取码 `{text}` 已永久删除", parse_mode="Markdown")
+            await update.message.reply_text(f"✅ 删除 {text} 成功")
         else:
             await update.message.reply_text("❌ 提取码不存在")
 
     elif action == "ban":
-        if text.startswith("/unban "):
-            target_id = int(text.split()[1])
-            if target_id in banned_users:
-                banned_users.remove(target_id)
-                save_banned()
-                await update.message.reply_text(f"✅ 已解封用户 {target_id}")
-            else:
-                await update.message.reply_text("❌ 该用户未被封禁")
-        else:
-            try:
-                target_id = int(text)
-                if target_id not in banned_users:
-                    banned_users.append(target_id)
+        try:
+            if text.startswith("/unban"):
+                uid = int(text.split()[1])
+                if uid in banned_users:
+                    banned_users.remove(uid)
                     save_banned()
-                    await update.message.reply_text(f"✅ 已封禁用户 {target_id}")
+                    await update.message.reply_text(f"✅ 已解封 {uid}")
                 else:
-                    await update.message.reply_text("❌ 该用户已被封禁")
-            except:
-                await update.message.reply_text("❌ 请输入正确的用户ID")
+                    await update.message.reply_text("❌ 未封禁")
+            else:
+                uid = int(text)
+                if uid not in banned_users:
+                    banned_users.append(uid)
+                    save_banned()
+                    await update.message.reply_text(f"✅ 已封禁 {uid}")
+        except:
+            await update.message.reply_text("❌ 格式错误")
 
     elif action == "view_uploader":
         try:
-            target_id = int(text)
-            user_packages = []
+            uid = int(text)
+            res = []
             for code, pkg in db.items():
-                if pkg["uploader"]["id"] == target_id:
-                    user_packages.append(
-                        f"🔑 提取码：`{code}`\n"
-                        f"📦 包名：`{pkg.get('name', '未命名')}`\n"
-                        f"📁 文件数：{len(pkg['files'])}\n"
-                        f"⏰ 上传时间：{pkg['time']}\n"
-                    )
-            if user_packages:
-                await update.message.reply_text(
-                    f"👤 用户 {target_id} 的上传记录：\n\n" + "\n".join(user_packages),
-                    parse_mode="Markdown"
-                )
-            else:
-                await update.message.reply_text("❌ 该用户没有上传任何文件")
+                if pkg["uploader"]["id"] == uid:
+                    res.append(f"🔑 `{code}`\n📦 {pkg.get('name','未命名')} | {len(pkg['files'])}个文件")
+            await update.message.reply_text("\n\n".join(res) if res else "❌ 无上传记录", parse_mode="Markdown")
         except:
-            await update.message.reply_text("❌ 请输入正确的用户ID")
+            await update.message.reply_text("❌ 输入正确用户ID")
 
     del context.user_data["admin_action"]
 
-# ====================== 用户核心功能 ======================
+# ====================== 用户功能 ======================
 @check_ban
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 欢迎使用【永久文件存储机器人】\n\n"
-        "📝 使用方法：\n"
-        "1. 连续发送多张图片/多个文件\n"
-        "2. 发送命令 /confirm 确认打包\n"
-        "3. 可给文件包命名，也可跳过\n"
-        "4. 直接发送提取码，立即取回文件"
-    )
+    await update.message.reply_text("👋 发送文件 → /confirm 打包 → 命名 → 获取提取码")
 
 @check_ban
 async def collect_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    message = update.message
+    uid = update.effective_user.id
+    msg = update.message
 
-    if user_id not in user_sessions:
-        user_sessions[user_id] = []
+    if uid not in user_sessions:
+        user_sessions[uid] = []
 
-    file_info = None
-    if message.document:
-        file_info = {
-            "type": "doc",
-            "id": message.document.file_id,
-            "name": message.document.file_name or "未命名文件"
-        }
-    elif message.photo:
-        file_info = {
-            "type": "img",
-            "id": message.photo[-1].file_id,
-            "name": f"图片_{datetime.now().strftime('%H%M%S')}.jpg"
-        }
-    else:
-        await message.reply_text("❌ 仅支持图片和文件")
+    f = None
+    if msg.document:
+        f = {"type":"doc","id":msg.document.file_id,"name":msg.document.file_name or "文件"}
+    elif msg.photo:
+        f = {"type":"img","id":msg.photo[-1].file_id,"name":f"图{datetime.now().strftime('%H%M%S')}"}
+
+    if not f:
+        await msg.reply_text("❌ 仅支持图片/文件")
         return
 
-    user_sessions[user_id].append(file_info)
-    await message.reply_text(
-        f"✅ 已接收：`{file_info['name']}`\n"
-        f"当前已收集 {len(user_sessions[user_id])} 个文件\n"
-        f"输入 /confirm 完成打包",
-        parse_mode="Markdown"
-    )
+    user_sessions[uid].append(f)
+    await msg.reply_text(f"✅ 已收：{len(user_sessions[uid])} 个\n输入 /confirm 打包")
 
 @check_ban
 async def confirm_package(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in user_sessions or not user_sessions[user_id]:
-        await update.message.reply_text("❌ 你还没有上传任何文件")
+    uid = update.effective_user.id
+    if uid not in user_sessions or not user_sessions[uid]:
+        await update.message.reply_text("❌ 你还没上传文件")
         return
 
-    # 生成唯一提取码
     while True:
-        code = str(random.randint(100000, 999999))
-        if code not in db:
-            break
+        code = str(random.randint(100000,999999))
+        if code not in db: break
 
-    # 先保存到 pending_naming，等待用户命名
-    pending_naming[user_id] = {
+    pending_naming[uid] = {
         "code": code,
-        "files": user_sessions[user_id],
-        "uploader": {
-            "id": user_id,
-            "name": update.effective_user.full_name
-        },
+        "files": user_sessions[uid],
+        "uploader": {"id":uid, "name":update.effective_user.full_name},
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
-    del user_sessions[user_id]
-
-    await update.message.reply_text(
-        f"📦 打包完成！\n"
-        f"🔑 提取码：`{code}`\n"
-        f"请为这个文件包命名（最多50字），或发送 /skip 跳过命名。",
-        parse_mode="Markdown"
-    )
+    del user_sessions[uid]
+    await update.message.reply_text(f"📦 打包成功！\n🔑 提取码：`{code}`\n请输入包名，或 /skip 跳过", parse_mode="Markdown")
 
 @check_ban
-async def handle_naming(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in pending_naming:
-        return
-
+async def handle_text_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
     text = update.message.text.strip()
-    pkg_data = pending_naming[user_id]
 
-    if text == "/skip":
-        pkg_data["name"] = "未命名"
-    else:
-        pkg_data["name"] = text[:50]  # 限制长度
+    # ———— 【修复】：如果正在命名，优先处理 ————
+    if uid in pending_naming:
+        pkg = pending_naming[uid]
+        if text == "/skip":
+            pkg["name"] = "未命名"
+        else:
+            pkg["name"] = text[:50]
 
-    # 正式存入数据库
-    db[pkg_data["code"]] = pkg_data
-    save_db()
-    del pending_naming[user_id]
-
-    await update.message.reply_text(
-        f"✅ 保存成功！\n"
-        f"📦 包名：`{pkg_data['name']}`\n"
-        f"🔑 提取码：`{pkg_data['code']}`\n"
-        f"💡 发送此提取码，即可取回所有文件",
-        parse_mode="Markdown"
-    )
-
-@check_ban
-async def retrieve_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    code = update.message.text.strip()
-    if code not in db:
+        db[pkg["code"]] = pkg
+        save_db()
+        del pending_naming[uid]
+        await update.message.reply_text(f"✅ 完成！\n📦 包名：`{pkg['name']}`\n🔑 提取码：`{pkg['code']}`", parse_mode="Markdown")
         return
 
-    pkg = db[code]
-    await update.message.reply_text(
-        f"📦 正在为你取回文件包「{pkg.get('name', '未命名')}」（共 {len(pkg['files'])} 个）...",
-        parse_mode="Markdown"
-    )
+    # ———— 管理员操作 ————
+    if uid == ADMIN_USER_ID and "admin_action" in context.user_data:
+        await handle_admin_text(update, context)
+        return
 
-    for f in pkg["files"]:
-        try:
-            if f["type"] == "img":
-                await update.message.reply_photo(photo=f["id"], caption=f"📄 {f['name']}")
-            else:
-                await update.message.reply_document(document=f["id"], filename=f["name"])
-        except Exception as e:
-            await update.message.reply_text(f"⚠️ 发送 `{f['name']}` 失败：{str(e)}")
+    # ———— 提取码 ————
+    if text in db:
+        pkg = db[text]
+        await update.message.reply_text(f"📦 正在取回：{pkg.get('name','未命名')}")
+        for f in pkg["files"]:
+            try:
+                if f["type"] == "img":
+                    await update.message.reply_photo(f["id"])
+                else:
+                    await update.message.reply_document(f["id"], filename=f["name"])
+            except:
+                await update.message.reply_text(f"⚠️ 文件发送失败")
+        return
 
-# ====================== 主程序（修复处理器顺序） ======================
+# ====================== 启动 ======================
 def main():
-    if not BOT_TOKEN:
-        raise ValueError("TELEGRAM_BOT_TOKEN 环境变量未设置")
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("confirm", confirm_package))
+    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(MessageHandler(filters.ATTACHMENT, collect_files))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_all))
+    app.add_handler(CallbackQueryHandler(admin_callback))
 
-    # 1. 命令处理器
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("confirm", confirm_package))
-    application.add_handler(CommandHandler("skip", handle_naming))
-    application.add_handler(CommandHandler("admin", admin_panel))
-
-    # 2. 管理员文本操作（优先级最高）
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text))
-
-    # 3. 文件命名处理（优先级次之）
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_naming))
-
-    # 4. 提取码取回文件（最后处理）
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, retrieve_files))
-
-    # 5. 文件收集
-    application.add_handler(MessageHandler(filters.ATTACHMENT, collect_files))
-
-    # 6. 回调处理
-    application.add_handler(CallbackQueryHandler(admin_callback))
-
-    application.run_polling()
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
