@@ -1,177 +1,114 @@
 from pyrogram import Client, filters
+from pyrogram.types import Message
 import os
-import random
-import string
-import psycopg2
+import uuid
+import zipfile
+from io import BytesIO
+import json
+import redis
+import asyncio
 
-# 从环境变量读取配置
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-DATABASE_URL = os.getenv("DATABASE_URL")
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+REDIS_URL = os.environ.get("REDIS_URL")
 
-app = Client("filebot", bot_token=BOT_TOKEN, api_id=API_ID, api_hash=API_HASH)
+r = redis.from_url(REDIS_URL)
 
-# 初始化数据库连接
-def init_db():
-    conn = psycopg2.connect(DATABASE_URL)
-    cur = conn.cursor()
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS files (
-            id SERIAL PRIMARY KEY,
-            code TEXT UNIQUE,
-            file_id TEXT,
-            file_type TEXT,
-            user_id BIGINT
-        )
-    ''')
-    conn.commit()
-    cur.close()
-    conn.close()
+app = Client(
+    "my_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
 
-# 生成随机提取码
-def generate_code():
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+pending_album = {}
+
+@app.on_message(filters.media_group)
+async def handle_media_group(client, message: Message):
+    gid = message.media_group_id
+    uid = message.from_user.id if message.from_user else 0
+
+    if gid not in pending_album:
+        pending_album[gid] = {
+            "user_id": uid,
+            "msgs": []
+        }
+
+    pending_album[gid]["msgs"].append(message)
+    await asyncio.sleep(1)
+
+    if len(pending_album[gid]["msgs"]) == message.media_group_count:
+        await process_album(gid)
+
+async def process_album(gid):
+    data = pending_album.pop(gid)
+    msgs = data["msgs"]
+    uid = data["user_id"]
+    code = str(uuid.uuid4())[:8].upper()
+
+    paths = []
+    for msg in msgs:
+        path = await msg.download()
+        if path:
+            paths.append(path)
+
+    r.set(f"file:{code}", json.dumps({
+        "user_id": uid,
+        "files": paths
+    }))
+
+    await msgs[0].reply(f"✅ 批量保存成功！\n提取码：`{code}`\n使用 /get {code} 提取全部文件")
+
+@app.on_message(filters.media & ~filters.media_group)
+async def handle_single_media(client, message: Message):
+    code = str(uuid.uuid4())[:8].upper()
+    path = await message.download()
+    uid = message.from_user.id if message.from_user else 0
+
+    r.set(f"file:{code}", json.dumps({
+        "user_id": uid,
+        "files": [path]
+    }))
+
+    await message.reply(f"✅ 保存成功！\n提取码：`{code}`\n使用 /get {code} 提取")
+
+@app.on_message(filters.command("get"))
+async def get_file(client, message: Message):
+    if len(message.command) < 2:
+        await message.reply("❌ 用法：/get 提取码")
+        return
+
+    code = message.command[1].upper()
+    data = r.get(f"file:{code}")
+
+    if not data:
+        await message.reply("❌ 提取码不存在")
+        return
+
+    info = json.loads(data)
+    uid = message.from_user.id if message.from_user else 0
+
+    if info["user_id"] != uid:
+        await message.reply("❌ 你没有权限提取这个文件")
+        return
+
+    files = info["files"]
+
+    if len(files) == 1:
+        await message.reply_document(files[0], caption=f"提取码：{code}")
+    else:
+        z = BytesIO()
+        z.name = f"{code}.zip"
+        with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as zp:
+            for f in files:
+                zp.write(f, os.path.basename(f))
+        z.seek(0)
+        await message.reply_document(z, caption=f"✅ 批量提取：共 {len(files)} 个文件")
 
 @app.on_message(filters.command("start"))
-async def start(client, message):
-    await message.reply("✅ 我是文件存储机器人！\n发送文件/图片/视频给我，我会给你一个提取码。")
-
-@app.on_message(filters.document | filters.photo | filters.video)
-async def handle_file(client, message):
-    if message.document:
-        file_id = message.document.file_id
-        file_type = "document"
-    elif message.photo:
-        file_id = message.photo.file_id
-        file_type = "photo"
-    elif message.video:
-        file_id = message.video.file_id
-        file_type = "video"
-    else:
-        await message.reply("❌ 不支持的文件类型")
-        return
-
-    code = generate_code()
-    user_id = message.from_user.id
-
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO files (code, file_id, file_type, user_id) VALUES (%s, %s, %s, %s)",
-            (code, file_id, file_type, user_id)
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-        await message.reply(f"✅ 文件已保存！\n提取码：`{code}`")
-    except Exception as e:
-        await message.reply(f"❌ 保存失败：{str(e)}")
-
-@app.on_message(filters.command("mycodes"))
-async def my_codes(client, message):
-    user_id = message.from_user.id
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("SELECT code, file_type FROM files WHERE user_id = %s", (user_id,))
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-
-        if not rows:
-            await message.reply("📭 你没有保存任何文件")
-            return
-
-    except Exception as e:
-        await message.reply(f"❌ 查询失败：{str(e)}")
-        return
-
-    text = "📁 你的提取码：\n"
-    for code, file_type in rows:
-        text += f"- `{code}` ({file_type})\n"
-    await message.reply(text)
-
-@app.on_message(filters.command("delcode"))
-async def del_code(client, message):
-    if len(message.command) < 2:
-        await message.reply("⚠️ 用法：/delcode [提取码]")
-        return
-
-    code = message.command[1]
-    user_id = message.from_user.id
-
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute(
-            "DELETE FROM files WHERE code = %s AND user_id = %s",
-            (code, user_id)
-        )
-        if cur.rowcount == 0:
-            await message.reply("❌ 提取码不存在或不属于你")
-        else:
-            conn.commit()
-            await message.reply("✅ 文件已删除")
-        cur.close()
-        conn.close()
-    except Exception as e:
-        await message.reply(f"❌ 删除失败：{str(e)}")
-
-@app.on_message(filters.command("allcodes"))
-async def all_codes(client, message):
-    if message.from_user.id != ADMIN_ID:
-        await message.reply("❌ 你没有权限使用此命令")
-        return
-
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("SELECT code, user_id, file_type FROM files")
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-
-        if not rows:
-            await message.reply("📭 数据库中没有任何文件")
-            return
-
-    except Exception as e:
-        await message.reply(f"❌ 查询失败：{str(e)}")
-        return
-
-    text = "📊 所有文件：\n"
-    for code, user_id, file_type in rows:
-        text += f"- `{code}` | 用户: {user_id} | 类型: {file_type}\n"
-    await message.reply(text)
-
-@app.on_message(filters.text & ~filters.command(["start", "mycodes", "delcode", "allcodes"]))
-async def get_file(client, message):
-    code = message.text.strip()
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("SELECT file_id, file_type FROM files WHERE code = %s", (code,))
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-
-        if not row:
-            await message.reply("❌ 提取码不存在")
-            return
-
-        file_id, file_type = row
-        if file_type == "document":
-            await app.send_document(message.chat.id, file_id)
-        elif file_type == "photo":
-            await app.send_photo(message.chat.id, file_id)
-        elif file_type == "video":
-            await app.send_video(message.chat.id, file_id)
-    except Exception as e:
-        await message.reply(f"❌ 获取失败：{str(e)}")
+async def start(message):
+    await message.reply("✅ 发送文件/图片，自动生成提取码\n多张图片 = 一个提取码")
 
 if __name__ == "__main__":
-    init_db()
     app.run()
