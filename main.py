@@ -319,21 +319,32 @@ async def retrieve_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text(f"⚠️ 发送 `{f['name']}` 失败：{str(e)}")
 
-# ====================== 主程序 ======================
+# ====================== 主程序（修复处理器顺序） ======================
 def main():
     if not BOT_TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN 环境变量未设置")
 
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # 1. 命令处理器
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("confirm", confirm_package))
     application.add_handler(CommandHandler("skip", handle_naming))
     application.add_handler(CommandHandler("admin", admin_panel))
-    application.add_handler(MessageHandler(filters.ATTACHMENT, collect_files))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, retrieve_files))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_naming))
+
+    # 2. 管理员文本操作（优先级最高）
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text))
+
+    # 3. 文件命名处理（优先级次之）
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_naming))
+
+    # 4. 提取码取回文件（最后处理）
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, retrieve_files))
+
+    # 5. 文件收集
+    application.add_handler(MessageHandler(filters.ATTACHMENT, collect_files))
+
+    # 6. 回调处理
     application.add_handler(CallbackQueryHandler(admin_callback))
 
     application.run_polling()
