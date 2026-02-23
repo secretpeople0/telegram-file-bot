@@ -4,143 +4,112 @@ import os
 import uuid
 import json
 import redis
-import asyncio
-import boto3
+import oss2
 import tempfile
-from botocore.config import Config
+import traceback
 
-# 配置
+# 从环境变量读取配置
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 REDIS_URL = os.environ.get("REDIS_URL")
 
-# Cloudflare R2
-R2_BUCKET = os.environ.get("R2_BUCKET")
-R2_ENDPOINT = os.environ.get("R2_ENDPOINT")
-R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY")
-R2_SECRET_KEY = os.environ.get("R2_SECRET_KEY")
+OSS_ENDPOINT = os.environ.get("OSS_ENDPOINT")
+OSS_BUCKET = os.environ.get("OSS_BUCKET")
+OSS_ACCESS_KEY = os.environ.get("OSS_ACCESS_KEY")
+OSS_SECRET_KEY = os.environ.get("OSS_SECRET_KEY")
 
-# R2 客户端
-s3 = boto3.client(
-    "s3",
-    endpoint_url=R2_ENDPOINT,
-    aws_access_key_id=R2_ACCESS_KEY,
-    aws_secret_access_key=R2_SECRET_KEY,
-    config=Config(signature_version="s3v4"),
-)
+# 初始化阿里云 OSS
+auth = oss2.Auth(OSS_ACCESS_KEY, OSS_SECRET_KEY)
+bucket = oss2.Bucket(auth, OSS_ENDPOINT, OSS_BUCKET)
 
-# Redis
+# 初始化 Redis
 r = redis.from_url(REDIS_URL)
 
-app = Client(
-    "my_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
-)
+app = Client("tg_oss_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# 上传文件到 R2
-def upload_to_r2(local_path):
+# 上传文件到 OSS
+def upload_to_oss(file_path):
     try:
-        ext = os.path.splitext(local_path)[1]
-        key = f"files/{uuid.uuid4()}{ext}"
-        s3.upload_file(local_path, R2_BUCKET, key)
-        return key
-    except:
+        file_ext = os.path.splitext(file_path)[1]
+        object_key = f"tg_files/{uuid.uuid4()}{file_ext}"
+        bucket.put_object_from_file(object_key, file_path)
+        return object_key
+    except Exception as e:
+        print(f"上传失败: {e}")
         return None
 
-# 单图/文件
+# 处理 /start 命令
+@app.on_message(filters.command("start"))
+async def start(client, message):
+    await message.reply("✅ 机器人已启动！发送图片或文件，我会帮你保存到阿里云 OSS。")
+
+# 处理 /get 命令，根据提取码获取下载链接
+@app.on_message(filters.command("get"))
+async def get_file(client, message):
+    if len(message.command) < 2:
+        await message.reply("❌ 用法：/get 提取码")
+        return
+    code = message.command[1].upper()
+    data = r.get(f"file:{code}")
+    if not data:
+        await message.reply("❌ 提取码不存在或已过期")
+        return
+    data = json.loads(data)
+    if message.from_user.id != data["user_id"]:
+        await message.reply("❌ 你没有权限获取这个文件")
+        return
+    # 生成带签名的下载链接（1小时有效期）
+    urls = [bucket.sign_url("GET", key, 3600) for key in data["keys"]]
+    await message.reply("📥 下载链接（1小时内有效）：\n" + "\n".join(urls))
+
+# 处理单张图片/单个文件
 @app.on_message(filters.media & ~filters.media_group)
-async def handle_single(client, message: Message):
+async def handle_single_media(client, message):
     try:
-        code = str(uuid.uuid4())[:8].upper()
-        tmp = await message.download(tempfile.mktemp())
-        key = upload_to_r2(tmp)
-        os.remove(tmp)
-
+        # 下载文件到临时目录
+        tmp_path = tempfile.mktemp()
+        await message.download(tmp_path)
+        # 上传到 OSS
+        key = upload_to_oss(tmp_path)
+        os.remove(tmp_path)
         if not key:
-            await message.reply("❌ 上传失败")
+            await message.reply("❌ 文件上传到 OSS 失败")
             return
-
-        uid = message.from_user.id if message.from_user else 0
+        # 生成提取码并存入 Redis
+        code = uuid.uuid4().hex[:8].upper()
         r.set(f"file:{code}", json.dumps({
-            "user_id": uid,
-            "files": [key]
-        }))
-
-        await message.reply(f"✅ 保存成功！\n提取码：`{code}`")
+            "user_id": message.from_user.id,
+            "keys": [key]
+        }), ex=86400)  # 提取码有效期 24 小时
+        await message.reply(f"✅ 保存成功！\n提取码：`{code}`\n使用 /get {code} 获取下载链接")
     except Exception as e:
-        await message.reply("❌ 出错了")
+        await message.reply(f"❌ 处理失败: {traceback.format_exc()}")
 
-# 多张图（相册）
+# 处理相册（多张图片）
 @app.on_message(filters.media_group)
-async def handle_media_group(client, message: Message):
+async def handle_media_group(client, message):
     try:
-        msgs = await client.get_media_group(message.chat.id, message.id)
-        code = str(uuid.uuid4())[:8].upper()
+        group = await client.get_media_group(message.chat.id, message.id)
         keys = []
-        uid = message.from_user.id if message.from_user else 0
-
-        for m in msgs:
-            tmp = await m.download(tempfile.mktemp())
-            key = upload_to_r2(tmp)
-            os.remove(tmp)
+        for msg in group:
+            tmp_path = tempfile.mktemp()
+            await msg.download(tmp_path)
+            key = upload_to_oss(tmp_path)
+            os.remove(tmp_path)
             if key:
                 keys.append(key)
-
         if not keys:
-            await message.reply("❌ 批量上传失败")
+            await message.reply("❌ 批量上传失败，没有文件成功保存")
             return
-
+        code = uuid.uuid4().hex[:8].upper()
         r.set(f"file:{code}", json.dumps({
-            "user_id": uid,
-            "files": keys
-        }))
-
-        await message.reply(f"✅ 批量保存成功！\n提取码：`{code}`")
+            "user_id": message.from_user.id,
+            "keys": keys
+        }), ex=86400)
+        await message.reply(f"✅ 批量保存成功！共 {len(keys)} 个文件\n提取码：`{code}`\n使用 /get {code} 获取下载链接")
     except Exception as e:
-        await message.reply("❌ 批量处理失败")
-
-# 提取
-@app.on_message(filters.command("get"))
-async def get_file(client, message: Message):
-    try:
-        if len(message.command) < 2:
-            await message.reply("❌ 用法：/get 提取码")
-            return
-
-        code = message.command[1].upper()
-        data = r.get(f"file:{code}")
-        if not data:
-            await message.reply("❌ 提取码不存在")
-            return
-
-        info = json.loads(data)
-        uid = message.from_user.id if message.from_user else 0
-        if info["user_id"] != uid:
-            await message.reply("❌ 无权限")
-            return
-
-        keys = info["files"]
-        urls = []
-        for k in keys:
-            url = s3.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": R2_BUCKET, "Key": k},
-                ExpiresIn=3600
-            )
-            urls.append(url)
-
-        text = "📥 下载链接（1小时有效）：\n" + "\n".join(urls)
-        await message.reply_text(text)
-    except:
-        await message.reply("❌ 文件异常")
-
-# 开始
-@app.on_message(filters.command("start"))
-async def start(client, message: Message):
-    await message.reply("✅ 已启动\n单发/批量发图都支持\n生成提取码 → /get 提取码")
+        await message.reply(f"❌ 批量处理失败: {traceback.format_exc()}")
 
 if __name__ == "__main__":
     app.run()
