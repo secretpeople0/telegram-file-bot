@@ -94,7 +94,7 @@ def generate_unique_code(length=8):
             continue
     return ''.join(random.choice(chars) for _ in range(8))
 
-async def upload_files_to_oss(file_paths, user_id, code):
+def upload_files_to_oss(file_paths, user_id, code):
     oss_paths = []
     for idx, fp in enumerate(file_paths):
         try:
