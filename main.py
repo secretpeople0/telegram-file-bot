@@ -1,8 +1,6 @@
 import os
-import logging
 import random
-import string
-import sqlite3
+import json
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -14,341 +12,248 @@ from telegram.ext import (
     filters,
     ConversationHandler
 )
-import oss2
 
-# --- 日志配置 ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# ====================== 配置区 ======================
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
 
-# --- 环境变量配置 ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OSS_ACCESS_KEY = os.getenv("OSS_ACCESS_KEY")
-OSS_SECRET_KEY = os.getenv("OSS_SECRET_KEY")
-OSS_ENDPOINT = os.getenv("OSS_ENDPOINT")
-OSS_BUCKET = os.getenv("OSS_BUCKET")
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
-DATABASE_FILE = "/app/bot.db"
+# 持久化存储文件
+STORAGE_FILE = "database.json"
+# 临时会话存储（用户上传中但未确认的文件）
+user_sessions = {}
 
-# --- 全局常量 ---
-WAITING_FOR_NAME = 1
-BANNED_USERS = set()
-
-# --- 初始化 OSS ---
-auth = oss2.Auth(OSS_ACCESS_KEY, OSS_SECRET_KEY)
-bucket = oss2.Bucket(auth, OSS_ENDPOINT, OSS_BUCKET)
-
-# --- 数据库工具函数 ---
-def get_db_connection():
-    conn = sqlite3.connect(DATABASE_FILE)
-    conn.row_factory = sqlite3.Row
-    return conn
-
+# ====================== 数据模型 ======================
 def init_db():
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        # 创建表（兼容 SQLite 时间戳语法）
-        cur.execute('''CREATE TABLE IF NOT EXISTS user_files
-                       (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        user_id INTEGER NOT NULL,
-                        code TEXT UNIQUE NOT NULL,
-                        name TEXT,
-                        file_paths TEXT NOT NULL,
-                        created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
-        cur.execute('''CREATE TABLE IF NOT EXISTS banned_users
-                       (user_id INTEGER PRIMARY KEY,
-                        banned_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
-        conn.commit()
-        cur.close()
-        conn.close()
-        logger.info("✅ SQLite 数据库初始化成功")
-    except Exception as e:
-        logger.error(f"❌ 数据库初始化失败: {e}")
+    """初始化数据库，结构：{提取码: {文件列表, 上传信息}}"""
+    if not os.path.exists(STORAGE_FILE):
+        with open(STORAGE_FILE, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+    with open(STORAGE_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-def is_banned(user_id):
-    if user_id in BANNED_USERS:
-        return True
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,))
-        res = cur.fetchone() is not None
-        cur.close()
-        conn.close()
-        if res:
-            BANNED_USERS.add(user_id)
-        return res
-    except Exception as e:
-        logger.error(f"❌ 封禁查询失败: {e}")
-        return False
+db = init_db()
 
-def generate_unique_code(length=8):
-    chars = string.ascii_uppercase + string.digits
-    for _ in range(20):
-        code = ''.join(random.choice(chars) for _ in range(length))
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("SELECT 1 FROM user_files WHERE code = ?", (code,))
-            if cur.fetchone() is None:
-                cur.close()
-                conn.close()
-                return code
-            cur.close()
-            conn.close()
-        except Exception as e:
-            logger.error(f"❌ 生成提取码失败: {e}")
-            continue
-    return ''.join(random.choice(chars) for _ in range(8))
+def save_db():
+    """保存数据库"""
+    with open(STORAGE_FILE, "w", encoding="utf-8") as f:
+        json.dump(db, f, ensure_ascii=False, indent=2)
 
-# --- 核心功能函数 ---
-async def upload_files_to_oss(file_paths, user_id, code):
-    oss_paths = []
-    for idx, fp in enumerate(file_paths):
-        try:
-            oss_path = f"files/{user_id}/{code}/{idx}_{os.path.basename(fp)}"
-            with open(fp, 'rb') as f:
-                bucket.put_object(oss_path, f)
-            oss_paths.append(oss_path)
-            os.remove(fp)  # 删除本地临时文件
-        except Exception as e:
-            logger.error(f"❌ OSS 上传失败: {e}")
-            return None
-    return ','.join(oss_paths)
-
-# --- 命令处理器 ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if is_banned(user.id):
-        await update.message.reply_text("❌ 你已被封禁，无法使用本机器人")
+# ====================== 管理员功能 ======================
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ 你没有管理员权限")
         return
+
+    keyboard = [
+        [InlineKeyboardButton("📊 统计总数", callback_data="admin_stats")],
+        [InlineKeyboardButton("🔍 搜索文件", callback_data="admin_search")],
+        [InlineKeyboardButton("🗑️ 删除文件", callback_data="admin_delete")]
+    ]
     await update.message.reply_text(
-        "👋 欢迎使用文件存储机器人！\n"
-        "📤 直接发送图片/视频/文档即可上传\n"
-        "📝 上传后可给提取码命名\n"
-        "🔧 发送 /myfiles 查看/管理你的文件"
+        "👮 管理员控制面板",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def myfiles(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if is_banned(user.id):
-        await update.message.reply_text("❌ 你已被封禁")
+async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if user_id != ADMIN_USER_ID:
+        await query.edit_message_text("❌ 权限不足")
         return
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT code, name, created_at FROM user_files WHERE user_id = ? ORDER BY created_at DESC",
-            (user.id,)
+
+    if query.data == "admin_stats":
+        # 统计总数
+        total_packages = len(db)
+        total_files = sum(len(pkg["files"]) for pkg in db.values())
+        await query.edit_message_text(
+            f"📊 存储统计\n"
+            f"打包总数：{total_packages} 个\n"
+            f"文件总数：{total_files} 个"
         )
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ 数据库异常: {str(e)}")
+
+    elif query.data == "admin_search":
+        # 等待用户输入搜索关键词
+        await query.edit_message_text("🔍 请回复你要搜索的文件名关键词：")
+        context.user_data["admin_action"] = "search"
+
+    elif query.data == "admin_delete":
+        # 等待用户输入提取码
+        await query.edit_message_text("🗑️ 请回复要删除的提取码：")
+        context.user_data["admin_action"] = "delete"
+
+async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理管理员的文本输入（搜索/删除）"""
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID or "admin_action" not in context.user_data:
         return
 
-    if not rows:
-        await update.message.reply_text("📂 你的文件库为空")
-        return
+    action = context.user_data["admin_action"]
+    text = update.message.text.strip()
 
-    text = "📋 你的文件列表：\n"
-    keyboard = []
-    for r in rows:
-        text += f"• 提取码: `{r['code']}` | 名称: {r['name'] or '未命名'} | 时间: {r['created_at']}\n"
-        keyboard.append([InlineKeyboardButton(f"删除 {r['code']}", callback_data=f"del_{r['code']}")])
-
-    await update.message.reply_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-
-# --- 消息与回调处理器 ---
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if is_banned(user.id):
-        return
-
-    # 初始化文件队列
-    if 'file_queue' not in context.user_data:
-        context.user_data['file_queue'] = []
-
-    try:
-        # 处理不同类型文件
-        file_to_download = None
-        if update.message.document:
-            file_to_download = await update.message.document.get_file()
-        elif update.message.photo:
-            file_to_download = await update.message.photo[-1].get_file()  # 取最高清图
-        elif update.message.video:
-            file_to_download = await update.message.video.get_file()
+    if action == "search":
+        # 搜索文件名
+        results = []
+        for code, pkg in db.items():
+            for f in pkg["files"]:
+                if text.lower() in f["name"].lower():
+                    results.append(
+                        f"🔑 提取码：`{code}`\n"
+                        f"📄 匹配文件：`{f['name']}`\n"
+                        f"⏰ 上传时间：{pkg['time']}\n"
+                    )
+        if results:
+            await update.message.reply_text(
+                f"✅ 找到 {len(results)} 个匹配结果：\n\n" + "\n".join(results),
+                parse_mode="Markdown"
+            )
         else:
-            await update.message.reply_text("❌ 不支持的文件类型")
-            return
+            await update.message.reply_text("❌ 未找到匹配文件")
 
-        # 下载文件到本地
-        file_path = await file_to_download.download_to_drive()
-        context.user_data['file_queue'].append(file_path)
-        await update.message.reply_text(f"✅ 已接收 {len(context.user_data['file_queue'])} 个文件，即将生成提取码...")
+    elif action == "delete":
+        # 删除提取码包
+        if text in db:
+            del db[text]
+            save_db()
+            await update.message.reply_text(f"✅ 提取码 `{text}` 已永久删除", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("❌ 提取码不存在")
 
-        # 延迟生成提取码（支持批量上传）
-        context.job_queue.run_once(
-            generate_code_job,
-            5,
-            user_id=user.id,
-            data=context.user_data
-        )
+    # 清除动作标记
+    del context.user_data["admin_action"]
 
-    except Exception as e:
-        logger.error(f"❌ 文件处理失败: {e}")
-        await update.message.reply_text("❌ 文件处理失败，请重试")
+# ====================== 用户核心功能 ======================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """欢迎语 & 使用指南"""
+    await update.message.reply_text(
+        "👋 欢迎使用【永久文件存储机器人】\n\n"
+        "📝 使用方法：\n"
+        "1. 连续发送多张图片/多个文件\n"
+        "2. 发送命令 /confirm 确认打包\n"
+        "3. 获得唯一提取码，凭码可取回所有文件\n"
+        "4. 直接发送提取码，立即取回文件"
+    )
 
-async def generate_code_job(context: ContextTypes.DEFAULT_TYPE):
-    user_data = context.job.data
-    user_id = context.job.user_id
+async def collect_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """收集用户上传的文件，暂存于会话"""
+    user_id = update.effective_user.id
+    message = update.message
 
-    if not user_data.get('file_queue'):
+    # 初始化用户会话
+    if user_id not in user_sessions:
+        user_sessions[user_id] = []
+
+    # 处理文件/图片
+    file_info = None
+    if message.document:
+        file_info = {
+            "type": "doc",
+            "id": message.document.file_id,
+            "name": message.document.file_name or "未命名文件"
+        }
+    elif message.photo:
+        # 取最高清的一张
+        file_info = {
+            "type": "img",
+            "id": message.photo[-1].file_id,
+            "name": f"图片_{datetime.now().strftime('%H%M%S')}.jpg"
+        }
+    else:
+        await message.reply_text("❌ 仅支持图片和文件")
+        return
+
+    # 加入临时会话
+    user_sessions[user_id].append(file_info)
+    await message.reply_text(
+        f"✅ 已接收：`{file_info['name']}`\n"
+        f"当前已收集 {len(user_sessions[user_id])} 个文件\n"
+        f"输入 /confirm 完成打包",
+        parse_mode="Markdown"
+    )
+
+async def confirm_package(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """确认打包，生成提取码"""
+    user_id = update.effective_user.id
+    if user_id not in user_sessions or not user_sessions[user_id]:
+        await update.message.reply_text("❌ 你还没有上传任何文件")
         return
 
     # 生成唯一提取码
-    code = generate_unique_code()
-    # 上传到 OSS
-    oss_paths = await upload_files_to_oss(user_data['file_queue'], user_id, code)
+    while True:
+        code = str(random.randint(100000, 999999))  # 升级为6位，降低冲突
+        if code not in db:
+            break
 
-    if not oss_paths:
-        await context.bot.send_message(user_id, "❌ 文件上传至阿里云 OSS 失败")
-        user_data['file_queue'].clear()
-        return
-
-    # 写入数据库
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO user_files (user_id, code, name, file_paths) VALUES (?, ?, ?, ?)",
-            (user_id, code, None, oss_paths)
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        logger.error(f"❌ 写入数据库失败: {e}")
-        await context.bot.send_message(user_id, "⚠️ 文件上传成功，但记录保存失败")
-
-    # 发送提取码并询问命名
-    keyboard = [
-        [InlineKeyboardButton("✅ 命名", callback_data=f"name_{code}")],
-        [InlineKeyboardButton("❌ 跳过", callback_data=f"skip_{code}")]
-    ]
-    await context.bot.send_message(
-        user_id,
-        f"🎉 文件上传成功！\n你的提取码: `{code}`",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-
-    # 清空队列
-    user_data['file_queue'].clear()
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()  # 必须先调用，避免 Telegram 报错
-    user_id = query.from_user.id
-    data = query.data
-
-    # 处理删除
-    if data.startswith('del_'):
-        code = data[4:]
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute(
-                "DELETE FROM user_files WHERE code = ? AND user_id = ?",
-                (code, user_id)
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
-            await query.edit_message_text(f"🗑️ 提取码 `{code}` 已成功删除", parse_mode='Markdown')
-        except Exception as e:
-            await query.edit_message_text(f"❌ 删除失败: {str(e)}", parse_mode='Markdown')
-        return
-
-    # 处理命名
-    if data.startswith('name_'):
-        code = data[5:]
-        context.user_data['pending_rename_code'] = code
-        await query.edit_message_text("✏️ 请回复本条消息，发送你想要设置的名称")
-        return WAITING_FOR_NAME
-
-    # 处理跳过
-    if data.startswith('skip_'):
-        code = data[5:]
-        await query.edit_message_text(f"✅ 已跳过命名，提取码: `{code}`", parse_mode='Markdown')
-        return
-
-async def handle_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    text = update.message.text.strip()
-
-    # 处理重命名
-    if 'pending_rename_code' in context.user_data:
-        code = context.user_data.pop('pending_rename_code')
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE user_files SET name = ? WHERE code = ? AND user_id = ?",
-                (text, code, user.id)
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
-            await update.message.reply_text(f"✅ 提取码 `{code}` 已命名为：{text}", parse_mode='Markdown')
-        except Exception as e:
-            await update.message.reply_text(f"❌ 命名失败: {str(e)}", parse_mode='Markdown')
-        return ConversationHandler.END
-
-    # 默认回复
-    await update.message.reply_text("📤 直接发送文件即可上传，发送 /myfiles 查看你的文件")
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ 操作已取消")
-    return ConversationHandler.END
-
-# --- 主程序 ---
-def main():
-    # 初始化数据库
-    init_db()
-
-    # 构建应用（适配 21.4 版本 API）
-    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-
-    # 对话处理器（处理命名）
-    conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler)],
-        states={
-            WAITING_FOR_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_conversation)]
+    # 保存到数据库
+    db[code] = {
+        "files": user_sessions[user_id],
+        "uploader": {
+            "id": user_id,
+            "name": update.effective_user.full_name
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "permanent": True  # 永久标记
+    }
+    save_db()
+
+    # 清空临时会话
+    del user_sessions[user_id]
+
+    # 回复用户
+    await update.message.reply_text(
+        f"🎉 打包成功！\n"
+        f"🔑 你的永久提取码：`{code}`\n"
+        f"📦 包含 {len(db[code]['files'])} 个文件\n"
+        f"💡 发送此提取码，即可取回所有文件",
+        parse_mode="Markdown"
     )
 
-    # 注册处理器
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("myfiles", myfiles))
-    application.add_handler(conv_handler)
-    # 处理文件（排除文本和命令）
-    application.add_handler(MessageHandler(
-        filters.ALL & ~filters.COMMAND & ~filters.TEXT,
-        handle_file
-    ))
+async def retrieve_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """凭提取码取回文件包"""
+    code = update.message.text.strip()
+    if code not in db:
+        return  # 非提取码，不处理
+
+    pkg = db[code]
+    # 发送文件包
+    await update.message.reply_text(
+        f"📦 正在为你取回文件包（共 {len(pkg['files'])} 个）...",
+        parse_mode="Markdown"
+    )
+
+    # 逐个发送文件
+    for f in pkg["files"]:
+        try:
+            if f["type"] == "img":
+                await update.message.reply_photo(photo=f["id"], caption=f"📄 {f['name']}")
+            else:
+                await update.message.reply_document(
+                    document=f["id"],
+                    filename=f["name"]
+                )
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ 发送 `{f['name']}` 失败：{str(e)}")
+
+# ====================== 主程序 ======================
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # 基础命令
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("confirm", confirm_package))
+    app.add_handler(CommandHandler("admin", admin_panel))
+
+    # 消息处理
+    app.add_handler(MessageHandler(filters.ATTACHMENT, collect_files))  # 接收文件
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, retrieve_files))  # 提取码取文件
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text))  # 管理员文本操作
+
+    # 回调处理
+    app.add_handler(CallbackQueryHandler(admin_callback))
 
     # 启动机器人
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
