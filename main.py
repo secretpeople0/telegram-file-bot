@@ -8,11 +8,13 @@ import json
 import redis
 import asyncio
 
+# 从环境变量读取配置
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 REDIS_URL = os.environ.get("REDIS_URL")
 
+# 连接 Redis
 r = redis.from_url(REDIS_URL)
 
 app = Client(
@@ -22,8 +24,10 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
+# 临时存放相册消息
 pending_album = {}
 
+# 处理相册（多张图片一起发）
 @app.on_message(filters.media_group)
 async def handle_media_group(client, message: Message):
     gid = message.media_group_id
@@ -32,7 +36,7 @@ async def handle_media_group(client, message: Message):
     if gid not in pending_album:
         pending_album[gid] = {
             "user_id": uid,
-            "msgs": []
+            "msgs": [],
         }
 
     pending_album[gid]["msgs"].append(message)
@@ -55,11 +59,12 @@ async def process_album(gid):
 
     r.set(f"file:{code}", json.dumps({
         "user_id": uid,
-        "files": paths
+        "files": paths,
     }))
 
     await msgs[0].reply(f"✅ 批量保存成功！\n提取码：`{code}`\n使用 /get {code} 提取全部文件")
 
+# 处理单张图片
 @app.on_message(filters.media & ~filters.media_group)
 async def handle_single_media(client, message: Message):
     code = str(uuid.uuid4())[:8].upper()
@@ -68,11 +73,12 @@ async def handle_single_media(client, message: Message):
 
     r.set(f"file:{code}", json.dumps({
         "user_id": uid,
-        "files": [path]
+        "files": [path],
     }))
 
     await message.reply(f"✅ 保存成功！\n提取码：`{code}`\n使用 /get {code} 提取")
 
+# 提取文件
 @app.on_message(filters.command("get"))
 async def get_file(client, message: Message):
     if len(message.command) < 2:
@@ -90,7 +96,7 @@ async def get_file(client, message: Message):
     uid = message.from_user.id if message.from_user else 0
 
     if info["user_id"] != uid:
-        await message.reply("❌ 你没有权限提取这个文件")
+        await message.reply("❌ 你没有权限")
         return
 
     files = info["files"]
