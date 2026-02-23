@@ -2,19 +2,35 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 import os
 import uuid
-import zipfile
-from io import BytesIO
 import json
 import redis
 import asyncio
+import boto3
+import tempfile
+from botocore.config import Config
 
-# 从环境变量读取配置
+# 配置
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 REDIS_URL = os.environ.get("REDIS_URL")
 
-# 连接 Redis
+# Cloudflare R2
+R2_BUCKET = os.environ.get("R2_BUCKET")
+R2_ENDPOINT = os.environ.get("R2_ENDPOINT")
+R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY")
+R2_SECRET_KEY = os.environ.get("R2_SECRET_KEY")
+
+# R2 客户端
+s3 = boto3.client(
+    "s3",
+    endpoint_url=R2_ENDPOINT,
+    aws_access_key_id=R2_ACCESS_KEY,
+    aws_secret_access_key=R2_SECRET_KEY,
+    config=Config(signature_version="s3v4"),
+)
+
+# Redis
 r = redis.from_url(REDIS_URL)
 
 app = Client(
@@ -24,97 +40,107 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
-# 临时存放相册消息
-pending_album = {}
+# 上传文件到 R2
+def upload_to_r2(local_path):
+    try:
+        ext = os.path.splitext(local_path)[1]
+        key = f"files/{uuid.uuid4()}{ext}"
+        s3.upload_file(local_path, R2_BUCKET, key)
+        return key
+    except:
+        return None
 
-# 处理相册（多张图片一起发）
+# 单图/文件
+@app.on_message(filters.media & ~filters.media_group)
+async def handle_single(client, message: Message):
+    try:
+        code = str(uuid.uuid4())[:8].upper()
+        tmp = await message.download(tempfile.mktemp())
+        key = upload_to_r2(tmp)
+        os.remove(tmp)
+
+        if not key:
+            await message.reply("❌ 上传失败")
+            return
+
+        uid = message.from_user.id if message.from_user else 0
+        r.set(f"file:{code}", json.dumps({
+            "user_id": uid,
+            "files": [key]
+        }))
+
+        await message.reply(f"✅ 保存成功！\n提取码：`{code}`")
+    except Exception as e:
+        await message.reply("❌ 出错了")
+
+# 多张图（相册）
 @app.on_message(filters.media_group)
 async def handle_media_group(client, message: Message):
-    gid = message.media_group_id
-    uid = message.from_user.id if message.from_user else 0
+    try:
+        msgs = await client.get_media_group(message.chat.id, message.id)
+        code = str(uuid.uuid4())[:8].upper()
+        keys = []
+        uid = message.from_user.id if message.from_user else 0
 
-    if gid not in pending_album:
-        pending_album[gid] = {
+        for m in msgs:
+            tmp = await m.download(tempfile.mktemp())
+            key = upload_to_r2(tmp)
+            os.remove(tmp)
+            if key:
+                keys.append(key)
+
+        if not keys:
+            await message.reply("❌ 批量上传失败")
+            return
+
+        r.set(f"file:{code}", json.dumps({
             "user_id": uid,
-            "msgs": [],
-        }
+            "files": keys
+        }))
 
-    pending_album[gid]["msgs"].append(message)
-    await asyncio.sleep(1)
+        await message.reply(f"✅ 批量保存成功！\n提取码：`{code}`")
+    except Exception as e:
+        await message.reply("❌ 批量处理失败")
 
-    if len(pending_album[gid]["msgs"]) == message.media_group_count:
-        await process_album(client, gid)
-
-async def process_album(client, gid):
-    data = pending_album.pop(gid)
-    msgs = data["msgs"]
-    uid = data["user_id"]
-    code = str(uuid.uuid4())[:8].upper()
-
-    paths = []
-    for msg in msgs:
-        path = await msg.download()
-        if path:
-            paths.append(path)
-
-    r.set(f"file:{code}", json.dumps({
-        "user_id": uid,
-        "files": paths,
-    }))
-
-    await msgs[0].reply(f"✅ 批量保存成功！\n提取码：`{code}`\n使用 /get {code} 提取全部文件")
-
-# 处理单张图片
-@app.on_message(filters.media & ~filters.media_group)
-async def handle_single_media(client, message: Message):
-    code = str(uuid.uuid4())[:8].upper()
-    path = await message.download()
-    uid = message.from_user.id if message.from_user else 0
-
-    r.set(f"file:{code}", json.dumps({
-        "user_id": uid,
-        "files": [path],
-    }))
-
-    await message.reply(f"✅ 保存成功！\n提取码：`{code}`\n使用 /get {code} 提取文件")
-
-# 提取文件
+# 提取
 @app.on_message(filters.command("get"))
 async def get_file(client, message: Message):
-    if len(message.command) < 2:
-        await message.reply("❌ 用法：/get 提取码")
-        return
+    try:
+        if len(message.command) < 2:
+            await message.reply("❌ 用法：/get 提取码")
+            return
 
-    code = message.command[1].upper()
-    data = r.get(f"file:{code}")
+        code = message.command[1].upper()
+        data = r.get(f"file:{code}")
+        if not data:
+            await message.reply("❌ 提取码不存在")
+            return
 
-    if not data:
-        await message.reply("❌ 提取码不存在")
-        return
+        info = json.loads(data)
+        uid = message.from_user.id if message.from_user else 0
+        if info["user_id"] != uid:
+            await message.reply("❌ 无权限")
+            return
 
-    info = json.loads(data)
-    uid = message.from_user.id if message.from_user else 0
+        keys = info["files"]
+        urls = []
+        for k in keys:
+            url = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": R2_BUCKET, "Key": k},
+                ExpiresIn=3600
+            )
+            urls.append(url)
 
-    if info["user_id"] != uid:
-        await message.reply("❌ 你没有权限提取这个文件")
-        return
+        text = "📥 下载链接（1小时有效）：\n" + "\n".join(urls)
+        await message.reply_text(text)
+    except:
+        await message.reply("❌ 文件异常")
 
-    files = info["files"]
-
-    if len(files) == 1:
-        await message.reply_document(files[0], caption=f"提取码：{code}")
-    else:
-        z = BytesIO()
-        z.name = f"{code}.zip"
-        with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as zp:
-            for f in files:
-                zp.write(f, os.path.basename(f))
-        z.seek(0)
-        await message.reply_document(z, caption=f"✅ 批量提取：共 {len(files)} 个文件")
-
+# 开始
 @app.on_message(filters.command("start"))
 async def start(client, message: Message):
-    await message.reply("✅ 发送文件/图片，自动生成提取码\n多张图片 = 一个提取码")
+    await message.reply("✅ 已启动\n单发/批量发图都支持\n生成提取码 → /get 提取码")
 
 if __name__ == "__main__":
     app.run()
