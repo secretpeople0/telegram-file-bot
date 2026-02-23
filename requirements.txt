@@ -1,2 +1,2 @@
-python-telegram-bot==21.2
+python-telegram-bot==13.7
 oss2==2.18.1
