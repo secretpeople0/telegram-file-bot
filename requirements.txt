@@ -1,3 +1,1 @@
-python-telegram-bot[job-queue]==21.4
-python-dotenv==1.0.1
-oss2==2.18.1
+python-telegram-bot==20.7
