@@ -118,7 +118,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 欢迎使用文件存储机器人！\n"
         "📤 直接发送文件/图片/视频即可上传。\n"
         "📝 上传后可选择为代码命名。\n"
-        "🔧 发送 /myfiles 查看你的文件。"
+        "🔧 发送 /myfiles 查看你的文件。\n"
+        "⚙️ 管理员发送 /admin 进入面板。"
     )
 
 async def myfiles(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,6 +152,7 @@ async def myfiles(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ 你没有管理员权限。")
         return
 
     keyboard = [
@@ -173,6 +175,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 下载文件
     try:
+        new_file = None
         if update.message.document:
             new_file = await update.message.document.get_file()
         elif update.message.photo:
@@ -256,6 +259,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ 你没有权限删除此代码。", parse_mode='Markdown')
         cur.close()
         conn.close()
+        return
 
     # 命名/跳过
     elif data.startswith('name_'):
@@ -267,39 +271,127 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith('skip_'):
         code = data[5:]
         await query.edit_message_text(f"✅ 已跳过命名。代码：`{code}`", parse_mode='Markdown')
+        return
 
     # 管理员功能
-    elif user_id == ADMIN_USER_ID:
-        if data == "admin_all":
-            conn = get_db_connection()
-            cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-            cur.execute("SELECT u.code, u.name, u.user_id, u.created_at FROM user_files u ORDER BY u.created_at DESC LIMIT 50")
-            files = cur.fetchall()
-            cur.close()
-            conn.close()
+    if user_id != ADMIN_USER_ID:
+        await query.edit_message_text("❌ 你没有管理员权限。")
+        return
 
-            text = "📊 所有用户文件（最近50条）：\n"
-            for f in files:
-                text += f"• 代码: `{f['code']}` | 名称: {f['name'] or '未命名'} | 用户ID: {f['user_id']}\n"
-            await query.edit_message_text(text or "数据库为空。", parse_mode='Markdown')
+    if data == "admin_all":
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute("SELECT u.code, u.name, u.user_id, u.created_at FROM user_files u ORDER BY u.created_at DESC LIMIT 50")
+        files = cur.fetchall()
+        cur.close()
+        conn.close()
 
-        elif data == "admin_ban":
-            await query.edit_message_text("🔨 请回复此消息，发送要封禁的用户ID：")
-            context.user_data['admin_action'] = 'ban'
-            return WAITING_FOR_NAME
+        if not files:
+            await query.edit_message_text("📊 数据库中暂无文件记录。")
+            return
 
-        elif data == "admin_search":
-            await query.edit_message_text("🔎 请回复此消息，发送搜索关键词：")
-            context.user_data['admin_action'] = 'search'
-            return WAITING_FOR_NAME
+        text = "📊 所有用户文件（最近50条）：\n"
+        for f in files:
+            text += f"• 代码: `{f['code']}` | 名称: {f['name'] or '未命名'} | 用户ID: {f['user_id']}\n"
+        await query.edit_message_text(text, parse_mode='Markdown')
+
+    elif data == "admin_ban":
+        await query.edit_message_text("🔨 请回复此消息，发送要封禁的用户ID：")
+        context.user_data['admin_action'] = 'ban'
+        return WAITING_FOR_NAME
+
+    elif data == "admin_search":
+        await query.edit_message_text("🔎 请回复此消息，发送搜索关键词：")
+        context.user_data['admin_action'] = 'search'
+        return WAITING_FOR_NAME
 
 async def handle_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    # 处理重命名
+    # 处理重命名 (修复了此处的SQL语法错误)
     if 'pending_rename_code' in context.user_data:
         code = context.user_data.pop('pending_rename_code')
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("UPDATE user_files SET name = %s W
+        # 完整的SQL语句，无截断
+        cur.execute(
+            "UPDATE user_files SET name = %s WHERE code = %s AND user_id = %s",
+            (text, code, user_id)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        await update.message.reply_text(f"✅ 代码 `{code}` 已命名为：{text}", parse_mode='Markdown')
+        return ConversationHandler.END
+
+    # 处理管理员操作
+    if user_id == ADMIN_USER_ID and 'admin_action' in context.user_data:
+        action = context.user_data.pop('admin_action')
+        if action == 'ban':
+            try:
+                target_id = int(text)
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute("INSERT INTO banned_users (user_id) VALUES (%s) ON CONFLICT DO NOTHING", (target_id,))
+                conn.commit()
+                cur.close()
+                conn.close()
+                BANNED_USERS.add(target_id)
+                await update.message.reply_text(f"🔨 用户 `{target_id}` 已被封禁。", parse_mode='Markdown')
+            except ValueError:
+                await update.message.reply_text("❌ 无效的用户ID（必须是数字）。")
+        elif action == 'search':
+            conn = get_db_connection()
+            cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            cur.execute(
+                "SELECT code, name, user_id FROM user_files WHERE code ILIKE %s OR name ILIKE %s",
+                (f'%{text}%', f'%{text}%')
+            )
+            results = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            if not results:
+                await update.message.reply_text(f"❌ 未找到包含「{text}」的记录。")
+                return
+
+            reply_text = f"🔎 搜索结果（共{len(results)}条）：\n"
+            for r in results:
+                reply_text += f"• 代码: `{r['code']}` | 名称: {r['name'] or '未命名'} | 用户ID: {r['user_id']}\n"
+            await update.message.reply_text(reply_text, parse_mode='Markdown')
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ 操作已取消。")
+    return ConversationHandler.END
+
+# --- 主程序 ---
+def main():
+    # 初始化数据库
+    init_db()
+
+    # 构建应用
+    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # 对话处理器（处理命名、封禁、搜索）
+    conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(button_handler), CommandHandler('admin', admin_panel)],
+        states={
+            WAITING_FOR_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_conversation)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+
+    # 注册处理器
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('myfiles', myfiles))
+    application.add_handler(conv_handler)
+    # 处理文件上传（排除文本和命令）
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.TEXT, handle_file))
+
+    # 启动机器人
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
