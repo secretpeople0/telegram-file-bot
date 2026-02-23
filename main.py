@@ -19,7 +19,7 @@ ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
 user_sessions = {}
 pending_naming = {}
 
-# ====================== 永久存储 ======================
+# ====================== 核心：永远不会清空数据 ======================
 def get_db():
     try:
         return json.loads(os.environ.get("BOT_DB", "{}"))
@@ -29,7 +29,6 @@ def get_db():
 def save_db(db_data):
     os.environ["BOT_DB"] = json.dumps(db_data, ensure_ascii=False, indent=2)
 
-# 封禁
 def get_banned():
     try:
         return json.loads(os.environ.get("BOT_BANNED", "[]"))
@@ -50,7 +49,7 @@ def check_ban(func):
         return await func(update, context)
     return wrapper
 
-# ====================== 管理员面板 ======================
+# ====================== 管理员 ======================
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("❌ 无权限")
@@ -93,8 +92,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("👤 发送用户ID")
         context.user_data["admin_act"] = "view_user"
 
-# ====================== 管理员文本处理 ======================
-async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_admin_action(update: ContextTypes, context):
     if "admin_act" not in context.user_data:
         return
 
@@ -107,26 +105,21 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
     db = get_db()
 
     if act == "search":
-        # ====================== 修复：包含关键词搜索 ======================
         keyword = text.lower()
         result = []
         for code, pkg in db.items():
             for f in pkg["files"]:
-                fname = f["name"].lower()
-                if keyword in fname:
+                if keyword in f["name"].lower():
                     line = f"🔑 {code}\n📦 {pkg.get('name','未命名')}\n📄 {f['name']}"
                     if line not in result:
                         result.append(line)
-        if result:
-            await update.message.reply_text("\n\n".join(result))
-        else:
-            await update.message.reply_text("❌ 无匹配结果")
+        await update.message.reply_text("\n\n".join(result) if result else "❌ 无匹配结果")
 
     elif act == "delete":
         if text in db:
             del db[text]
             save_db(db)
-            await update.message.reply_text("✅ 已删除")
+            await update.message.reply_text("✅ 删除成功")
         else:
             await update.message.reply_text("❌ 提取码不存在")
 
@@ -139,7 +132,7 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
                     save_banned(banned_users)
                     await update.message.reply_text(f"✅ 已解封 {tid}")
                 else:
-                    await update.message.reply_text("❌ 未封禁")
+                    await update.message.reply_text("❌ 该用户未封禁")
             else:
                 tid = int(text)
                 if tid not in banned_users:
@@ -156,10 +149,7 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
             for code, pkg in db.items():
                 if pkg["uploader"]["id"] == target:
                     res.append(f"🔑 {code} | {pkg.get('name','未命名')}")
-            if res:
-                await update.message.reply_text("\n".join(res))
-            else:
-                await update.message.reply_text("❌ 该用户无上传")
+            await update.message.reply_text("\n".join(res) if res else "❌ 该用户无上传记录")
         except:
             await update.message.reply_text("❌ 无效ID")
 
@@ -218,7 +208,7 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     db = get_db()
 
-    # 命名流程
+    # 命名
     if uid in pending_naming:
         pkg = pending_naming[uid]
         pkg["name"] = text if text != "/skip" else "未命名"
@@ -228,7 +218,7 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ 完成！\n📦 {pkg['name']}\n🔑 {pkg['code']}")
         return
 
-    # 管理员操作
+    # 管理员
     if "admin_act" in context.user_data:
         await handle_admin_action(update, context)
         return
@@ -243,8 +233,8 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_photo(f["id"])
                 else:
                     await update.message.reply_document(f["id"], filename=f["name"])
-            except Exception as e:
-                await update.message.reply_text(f"⚠️ 文件发送失败")
+            except:
+                await update.message.reply_text("⚠️ 文件发送失败")
 
 # ====================== 启动 ======================
 def main():
