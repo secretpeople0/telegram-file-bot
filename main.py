@@ -1,137 +1,305 @@
 import os
 import time
 import logging
-from typing import Optional
-from telegram import Update, File
+import random
+import string
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
     CommandHandler,
     MessageHandler,
-    filters
+    CallbackQueryHandler,
+    filters,
+    ConversationHandler
 )
+import psycopg2
+import psycopg2.extras
 import oss2
 
-# 配置日志
+# --- 配置日志 ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# 从环境变量读取配置（缺失时用默认值，不强制校验）
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-OSS_ACCESS_KEY = os.getenv("OSS_ACCESS_KEY", "")
-OSS_SECRET_KEY = os.getenv("OSS_SECRET_KEY", "")
-OSS_ENDPOINT = os.getenv("OSS_ENDPOINT", "oss-cn-hangzhou.aliyuncs.com")
-OSS_BUCKET = os.getenv("OSS_BUCKET", "my-tg-bot-files")
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
+# --- 环境变量配置 (从Railway读取) ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+OSS_ACCESS_KEY = os.getenv("OSS_ACCESS_KEY")
+OSS_SECRET_KEY = os.getenv("OSS_SECRET_KEY")
+OSS_ENDPOINT = os.getenv("OSS_ENDPOINT")
+OSS_BUCKET = os.getenv("OSS_BUCKET")
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-# 全局 OSS Bucket 实例（懒加载）
-_oss_bucket: Optional[oss2.Bucket] = None
+# --- 全局常量 ---
+WAITING_FOR_NAME = 1
+BANNED_USERS = set()
 
-def get_oss_bucket() -> Optional[oss2.Bucket]:
-    """获取 OSS Bucket 实例，失败时返回 None 而不是崩溃"""
-    global _oss_bucket
-    if _oss_bucket is None:
-        try:
-            auth = oss2.Auth(OSS_ACCESS_KEY, OSS_SECRET_KEY)
-            _oss_bucket = oss2.Bucket(auth, OSS_ENDPOINT, OSS_BUCKET)
-            # 测试连接
-            _oss_bucket.get_bucket_acl()
-            logger.info("✅ OSS Bucket 初始化成功")
-        except Exception as e:
-            logger.error(f"❌ OSS Bucket 初始化失败: {e}")
-            _oss_bucket = None
-    return _oss_bucket
+# --- 初始化 OSS ---
+auth = oss2.Auth(OSS_ACCESS_KEY, OSS_SECRET_KEY)
+bucket = oss2.Bucket(auth, OSS_ENDPOINT, OSS_BUCKET)
 
-def upload_to_oss(file_path: str, object_name: str, max_retries: int = 3) -> bool:
-    """
-    上传文件到 OSS，带重试机制
-    :param file_path: 本地文件路径
-    :param object_name: OSS 中的对象名
-    :param max_retries: 最大重试次数
-    :return: 是否上传成功
-    """
-    bucket = get_oss_bucket()
-    if not bucket:
-        return False
+# --- 数据库工具函数 ---
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL)
 
-    for attempt in range(max_retries):
+def init_db():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    # 创建用户文件表
+    cur.execute('''CREATE TABLE IF NOT EXISTS user_files
+                   (id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    code TEXT UNIQUE NOT NULL,
+                    name TEXT,
+                    file_paths TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    # 创建封禁表
+    cur.execute('''CREATE TABLE IF NOT EXISTS banned_users
+                   (user_id BIGINT PRIMARY KEY,
+                    banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("✅ 数据库初始化成功")
+
+def is_banned(user_id):
+    if user_id in BANNED_USERS:
+        return True
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM banned_users WHERE user_id = %s", (user_id,))
+    result = cur.fetchone() is not None
+    cur.close()
+    conn.close()
+    if result:
+        BANNED_USERS.add(user_id)
+    return result
+
+# --- 核心功能函数 ---
+def generate_unique_code(length=8):
+    chars = string.ascii_uppercase + string.digits
+    while True:
+        code = ''.join(random.choice(chars) for _ in range(length))
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM user_files WHERE code = %s", (code,))
+        if cur.fetchone() is None:
+            cur.close()
+            conn.close()
+            return code
+        cur.close()
+        conn.close()
+
+async def upload_files_to_oss(file_paths, user_id, code):
+    oss_paths = []
+    for idx, file_path in enumerate(file_paths):
+        oss_path = f"files/{user_id}/{code}/{idx}_{os.path.basename(file_path)}"
         try:
             with open(file_path, 'rb') as f:
-                result = bucket.put_object(object_name, f)
-            if result.status == 200:
-                logger.info(f"✅ 文件 {object_name} 上传成功")
-                return True
-            else:
-                logger.warning(f"⚠️ 第 {attempt+1} 次上传失败，状态码: {result.status}")
+                bucket.put_object(oss_path, f)
+            oss_paths.append(oss_path)
+            os.remove(file_path) # 删除本地临时文件
         except Exception as e:
-            logger.error(f"❌ 第 {attempt+1} 次上传异常: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)  # 指数退避重试
-    return False
+            logger.error(f"上传失败: {e}")
+            return None
+    return ','.join(oss_paths)
 
+# --- 命令处理器 ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="👋 你好！我是文件存储机器人，直接发送文件给我即可上传到 OSS。"
+    user_id = update.effective_user.id
+    if is_banned(user_id):
+        await update.message.reply_text("❌ 你已被封禁，无法使用本机器人。")
+        return
+
+    await update.message.reply_text(
+        "👋 欢迎使用文件存储机器人！\n"
+        "📤 直接发送文件/图片/视频即可上传。\n"
+        "📝 上传后可选择为代码命名。\n"
+        "🔧 发送 /myfiles 查看你的文件。"
     )
 
+async def myfiles(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if is_banned(user_id):
+        await update.message.reply_text("❌ 你已被封禁。")
+        return
+
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cur.execute("SELECT code, name, created_at FROM user_files WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
+    files = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not files:
+        await update.message.reply_text("📂 你的文件库是空的。")
+        return
+
+    text = "📋 你的文件列表：\n"
+    keyboard = []
+    for f in files:
+        text += f"• 代码: `{f['code']}` | 名称: {f['name'] or '未命名'} | 时间: {f['created_at'].strftime('%Y-%m-%d')}\n"
+        keyboard.append([InlineKeyboardButton(f"删除 {f['code']}", callback_data=f"del_{f['code']}")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+# --- 管理员命令 ---
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID:
+        return
+
+    keyboard = [
+        [InlineKeyboardButton("📊 查看所有文件", callback_data="admin_all")],
+        [InlineKeyboardButton("🔨 封禁用户", callback_data="admin_ban")],
+        [InlineKeyboardButton("🔎 搜索文件", callback_data="admin_search")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("⚙️ 管理员面板", reply_markup=reply_markup)
+
+# --- 消息与回调处理器 ---
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    file: File = update.message.document or update.message.photo[-1] or update.message.video
-    if not file:
-        await update.message.reply_text("❌ 无法识别的文件类型")
+    if is_banned(user_id):
         return
 
-    # 检查文件大小
-    if file.file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
-        await update.message.reply_text(f"❌ 文件过大，最大支持 {MAX_FILE_SIZE_MB}MB")
-        return
+    # 初始化用户的文件列表
+    if 'file_queue' not in context.user_data:
+        context.user_data['file_queue'] = []
 
-    # 下载文件到本地临时目录
+    # 下载文件
     try:
-        file_path = await file.download_to_drive()
-        logger.info(f"✅ 文件 {file.file_name} 下载到本地成功")
+        if update.message.document:
+            new_file = await update.message.document.get_file()
+        elif update.message.photo:
+            new_file = await update.message.photo[-1].get_file()
+        elif update.message.video:
+            new_file = await update.message.video.get_file()
+        else:
+            await update.message.reply_text("❌ 不支持的文件类型")
+            return
+
+        file_path = await new_file.download_to_drive()
+        context.user_data['file_queue'].append(file_path)
+        await update.message.reply_text(f"✅ 已接收文件 ({len(context.user_data['file_queue'])})，继续发送或等待生成代码...")
+
+        # 自动生成代码（延迟5秒，等待用户批量上传）
+        context.job_queue.run_once(generate_code_job, 5, user_id=user_id, data=context.user_data)
+
     except Exception as e:
-        logger.error(f"❌ 文件下载失败: {e}")
-        await update.message.reply_text("❌ 文件下载失败，请重试")
+        logger.error(f"处理文件失败: {e}")
+        await update.message.reply_text("❌ 文件处理失败，请重试。")
+
+async def generate_code_job(context: ContextTypes.DEFAULT_TYPE):
+    user_data = context.job.data
+    user_id = context.job.user_id
+
+    if not user_data.get('file_queue'):
         return
 
-    # 生成 OSS 对象名（用户ID/时间戳_文件名）
-    timestamp = int(time.time())
-    object_name = f"{user_id}/{timestamp}_{file.file_name}"
+    # 生成唯一代码
+    code = generate_unique_code()
+    # 上传到OSS
+    oss_paths = await upload_files_to_oss(user_data['file_queue'], user_id, code)
+    if not oss_paths:
+        await context.bot.send_message(user_id, "❌ 文件上传到OSS失败。")
+        user_data['file_queue'].clear()
+        return
 
-    # 上传到 OSS
-    if upload_to_oss(file_path, object_name):
-        # 上传成功，删除本地临时文件
-        os.unlink(file_path)
-        await update.message.reply_text(f"✅ 文件上传成功！\nOSS 路径: `{object_name}`")
-    else:
-        os.unlink(file_path)
-        await update.message.reply_text("❌ 文件上传到 OSS 失败，请稍后重试")
+    # 保存到数据库（先设为未命名）
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO user_files (user_id, code, name, file_paths) VALUES (%s, %s, %s, %s)",
+        (user_id, code, None, oss_paths)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
 
-def main():
-    # 启动前校验
-    if not TELEGRAM_BOT_TOKEN:
-        raise ValueError("❌ TELEGRAM_BOT_TOKEN 环境变量缺失，请检查 Railway 配置")
-    if not OSS_ACCESS_KEY or not OSS_SECRET_KEY:
-        raise ValueError("❌ OSS_ACCESS_KEY 或 OSS_SECRET_KEY 缺失，请检查 Railway 配置")
-    logger.info("✅ 核心配置校验通过")
+    # 询问用户是否命名
+    keyboard = [
+        [InlineKeyboardButton("✅ 命名", callback_data=f"name_{code}")],
+        [InlineKeyboardButton("❌ 跳过", callback_data=f"skip_{code}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await context.bot.send_message(
+        user_id,
+        f"🎉 文件上传成功！\n你的提取代码: `{code}`\n是否为该代码命名？",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
 
-    # 初始化 OSS
-    get_oss_bucket()
+    # 清空队列
+    user_data['file_queue'].clear()
 
-    # 启动 Telegram Bot
-    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    data = query.data
 
-    # 注册处理器
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_file))
+    # 普通用户删除
+    if data.startswith('del_'):
+        code = data[4:]
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM user_files WHERE code = %s AND user_id = %s", (code, user_id))
+        conn.commit()
+        if cur.rowcount > 0:
+            await query.edit_message_text(f"🗑️ 代码 `{code}` 已成功删除。", parse_mode='Markdown')
+        else:
+            await query.edit_message_text("❌ 你没有权限删除此代码。", parse_mode='Markdown')
+        cur.close()
+        conn.close()
 
-    # 启动轮询
-    application.run_polling()
+    # 命名/跳过
+    elif data.startswith('name_'):
+        code = data[5:]
+        context.user_data['pending_rename_code'] = code
+        await query.edit_message_text("✏️ 请回复此消息，发送你想要设置的名称：")
+        return WAITING_FOR_NAME
 
-if __name__ == '__main__':
-    main()
+    elif data.startswith('skip_'):
+        code = data[5:]
+        await query.edit_message_text(f"✅ 已跳过命名。代码：`{code}`", parse_mode='Markdown')
+
+    # 管理员功能
+    elif user_id == ADMIN_USER_ID:
+        if data == "admin_all":
+            conn = get_db_connection()
+            cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            cur.execute("SELECT u.code, u.name, u.user_id, u.created_at FROM user_files u ORDER BY u.created_at DESC LIMIT 50")
+            files = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            text = "📊 所有用户文件（最近50条）：\n"
+            for f in files:
+                text += f"• 代码: `{f['code']}` | 名称: {f['name'] or '未命名'} | 用户ID: {f['user_id']}\n"
+            await query.edit_message_text(text or "数据库为空。", parse_mode='Markdown')
+
+        elif data == "admin_ban":
+            await query.edit_message_text("🔨 请回复此消息，发送要封禁的用户ID：")
+            context.user_data['admin_action'] = 'ban'
+            return WAITING_FOR_NAME
+
+        elif data == "admin_search":
+            await query.edit_message_text("🔎 请回复此消息，发送搜索关键词：")
+            context.user_data['admin_action'] = 'search'
+            return WAITING_FOR_NAME
+
+async def handle_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+
+    # 处理重命名
+    if 'pending_rename_code' in context.user_data:
+        code = context.user_data.pop('pending_rename_code')
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("UPDATE user_files SET name = %s W
