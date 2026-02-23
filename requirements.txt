@@ -1,3 +1,2 @@
 python-telegram-bot==20.7
 oss2==2.18.1
-psycopg2-binary==2.9.9
