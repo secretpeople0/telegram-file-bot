@@ -1,5 +1,4 @@
 pyrogram
 tgcrypto
 redis
-boto3
-botocore
+oss2
