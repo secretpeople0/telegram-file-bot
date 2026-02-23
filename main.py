@@ -29,8 +29,9 @@ r = redis.from_url(REDIS_URL)
 
 app = Client("file_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# 临时存储：用户 ID → { "files": [...], "pending": True }
+# 临时存储
 user_upload_temp = defaultdict(dict)
+pending_purge = {}
 
 # ========== 工具 ==========
 def is_admin(user_id: int) -> bool:
@@ -46,11 +47,26 @@ def upload_to_oss(file_path):
         return None
 
 # ========== 用户功能 ==========
+
+# 欢迎语
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    await message.reply("✅ 发送文件/图片，我会帮你永久保存～\n支持命名文件夹，也可以直接跳过！")
+    welcome = """👋 欢迎使用永久文件保存机器人
 
-# 接收文件
+✅ 使用方法：
+直接发送 图片 / 文件 / 相册 即可自动上传
+
+📁 文件夹命名：
+• 上传后发送文字 = 设置文件夹名
+• 上传后发送 /skip = 不命名（默认未命名）
+
+🔗 获取下载链接：
+/get 提取码
+
+💡 所有提取码永久有效"""
+    await message.reply(welcome)
+
+# 接收单文件
 @app.on_message(filters.media & ~filters.media_group)
 async def on_single_file(client, message):
     uid = message.from_user.id
@@ -69,7 +85,7 @@ async def on_single_file(client, message):
     await message.reply("📝 请为这个文件设置文件夹名（直接发送文字）\n或发送 /skip 跳过不命名")
     raise ContinuePropagation()
 
-# 接收相册（多图）
+# 接收相册
 @app.on_message(filters.media_group)
 async def on_album(client, message):
     uid = message.from_user.id
@@ -93,7 +109,7 @@ async def on_album(client, message):
     await message.reply("📝 请为这批文件设置文件夹名（直接发送文字）\n或发送 /skip 跳过不命名")
     raise ContinuePropagation()
 
-# 文件夹名
+# 文件夹命名
 @app.on_message(filters.text & filters.private)
 async def set_folder_name(client, message):
     uid = message.from_user.id
@@ -131,7 +147,7 @@ async def save_files(uid, folder_name, message):
         f"🔗 使用 /get {code} 获取下载链接"
     )
 
-# 获取下载链接
+# 获取链接
 @app.on_message(filters.command("get"))
 async def get_cmd(client, message):
     if len(message.command) < 2:
@@ -144,26 +160,28 @@ async def get_cmd(client, message):
         return
     d = json.loads(data)
     if message.from_user.id != d["user_id"] and not is_admin(message.from_user.id):
-        await message.reply("❌ 无权限")
+        await message.reply("❌ 你没有权限获取这个文件")
         return
     urls = [bucket.sign_url("GET", k, 3600) for k in d["keys"]]
     folder = d.get("folder") or "未命名"
     await message.reply(f"📁 文件夹：{folder}\n🔗 下载链接（1小时有效）：\n" + "\n".join(urls))
 
-# ========== 管理员 ==========
+# ========== 管理员功能 ==========
+
 @app.on_message(filters.command("admin") & filters.private)
 async def admin(client, message):
     if not is_admin(message.from_user.id):
         return
-    txt = (
-        "🔐 管理员菜单\n"
-        "/list — 所有提取码\n"
-        "/user <ID> — 查看用户文件\n"
-        "/delete <码> — 删除单个\n"
-        "/purge <ID> — 清空用户全部文件\n"
-        "/stats — 统计\n"
-        "/clean — 清理无效记录"
-    )
+    txt = """🔐 管理员功能菜单
+
+/admin        显示管理员菜单
+/list         查看所有提取码记录
+/user [ID]    查看该用户所有文件
+/delete [码]  删除指定提取码及文件
+/purge [ID]   清空某用户所有文件
+/confirm      二次确认清空（防误删）
+/stats        查看当前存储统计
+/clean        清理无效提取码记录"""
     await message.reply(txt)
 
 @app.on_message(filters.command("list") & filters.private)
@@ -185,12 +203,12 @@ async def list_all(client, message):
 async def user_files(client, message):
     if not is_admin(message.from_user.id): return
     if len(message.command) <2:
-        await message.reply("/user <ID>")
+        await message.reply("❌ 用法：/user <用户ID>")
         return
     try:
         target = int(message.command[1])
     except:
-        await message.reply("ID必须数字")
+        await message.reply("❌ 用户ID必须是数字")
         return
     allkeys = r.keys("file:*")
     res = []
@@ -209,13 +227,13 @@ async def user_files(client, message):
 async def delete_code(client, message):
     if not is_admin(message.from_user.id): return
     if len(message.command)<2:
-        await message.reply("/delete <提取码>")
+        await message.reply("❌ 用法：/delete <提取码>")
         return
     code = message.command[1].upper()
     key = f"file:{code}"
     data = r.get(key)
     if not data:
-        await message.reply("不存在")
+        await message.reply("❌ 提取码不存在")
         return
     d = json.loads(data)
     for f in d["keys"]:
@@ -225,18 +243,16 @@ async def delete_code(client, message):
     await message.reply(f"✅ {code} 已删除")
 
 # 清空用户 + 二次确认
-pending_purge = {}
-
 @app.on_message(filters.command("purge") & filters.private)
 async def purge_user(client, message):
     if not is_admin(message.from_user.id): return
     if len(message.command)<2:
-        await message.reply("/purge <用户ID>")
+        await message.reply("❌ 用法：/purge <用户ID>")
         return
     try:
         target = int(message.command[1])
     except:
-        await message.reply("ID必须数字")
+        await message.reply("❌ 用户ID必须是数字")
         return
     pending_purge[message.from_user.id] = target
     await message.reply(f"⚠️ 确定清空用户 {target} 所有文件？\n发送 /confirm 确认，30秒内有效")
@@ -246,7 +262,7 @@ async def confirm_purge(client, message):
     uid = message.from_user.id
     if not is_admin(uid): return
     if uid not in pending_purge:
-        await message.reply("无待确认操作")
+        await message.reply("❌ 无待确认操作")
         return
     target = pending_purge[uid]
     del pending_purge[uid]
