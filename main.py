@@ -11,8 +11,6 @@ from telegram.ext import (
     filters
 )
 import oss2
-import psycopg2
-from psycopg2 import sql
 
 # 配置日志
 logging.basicConfig(
@@ -21,15 +19,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 直接从环境变量读取配置（Railway 上直接配置）
+# 从环境变量读取配置
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OSS_ACCESS_KEY = os.getenv("OSS_ACCESS_KEY")
 OSS_SECRET_KEY = os.getenv("OSS_SECRET_KEY")
 OSS_ENDPOINT = os.getenv("OSS_ENDPOINT", "oss-cn-hangzhou.aliyuncs.com")
 OSS_BUCKET = os.getenv("OSS_BUCKET", "my-tg-bot-files")
-DATABASE_URL = os.getenv("DATABASE_URL")
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
-UPLOAD_TIMEOUT = int(os.getenv("UPLOAD_TIMEOUT", "300"))
 
 # 全局 OSS Bucket 实例（懒加载）
 _oss_bucket: Optional[oss2.Bucket] = None
@@ -118,7 +114,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     # 校验必填配置
-    if not all([TELEGRAM_BOT_TOKEN, OSS_ACCESS_KEY, OSS_SECRET_KEY, DATABASE_URL]):
+    if not all([TELEGRAM_BOT_TOKEN, OSS_ACCESS_KEY, OSS_SECRET_KEY]):
         raise ValueError("❌ 关键环境变量缺失，请检查 Railway 配置")
     logger.info("✅ 所有配置校验通过")
 
