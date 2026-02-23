@@ -1,284 +1,139 @@
-from pyrogram import Client, filters
-from pyrogram.types import Message
 import os
-import json
-import uuid
-import redis
+import time
+import logging
+from typing import Optional
+from telegram import Update, File
+from telegram.ext import (
+    ApplicationBuilder,
+    ContextTypes,
+    CommandHandler,
+    MessageHandler,
+    filters
+)
 import oss2
-import tempfile
-from collections import defaultdict
+import psycopg2
+from psycopg2 import sql
 
-# ========== 配置 ==========
-API_ID = int(os.environ.get("API_ID"))
-API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-REDIS_URL = os.environ.get("REDIS_URL")
+# 配置日志
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-OSS_ENDPOINT = os.environ.get("OSS_ENDPOINT")
-OSS_BUCKET = os.environ.get("OSS_BUCKET")
-OSS_ACCESS_KEY = os.environ.get("OSS_ACCESS_KEY")
-OSS_SECRET_KEY = os.environ.get("OSS_SECRET_KEY")
+# 直接从环境变量读取配置（Railway 上直接配置）
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+OSS_ACCESS_KEY = os.getenv("OSS_ACCESS_KEY")
+OSS_SECRET_KEY = os.getenv("OSS_SECRET_KEY")
+OSS_ENDPOINT = os.getenv("OSS_ENDPOINT", "oss-cn-hangzhou.aliyuncs.com")
+OSS_BUCKET = os.getenv("OSS_BUCKET", "my-tg-bot-files")
+DATABASE_URL = os.getenv("DATABASE_URL")
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
+UPLOAD_TIMEOUT = int(os.getenv("UPLOAD_TIMEOUT", "300"))
 
-ADMIN_IDS = list(map(int, os.environ.get("ADMIN_IDS", "").split(","))) if os.environ.get("ADMIN_IDS") else []
+# 全局 OSS Bucket 实例（懒加载）
+_oss_bucket: Optional[oss2.Bucket] = None
 
-# ========== 初始化 ==========
-auth = oss2.Auth(OSS_ACCESS_KEY, OSS_SECRET_KEY)
-bucket = oss2.Bucket(auth, OSS_ENDPOINT, OSS_BUCKET)
-r = redis.from_url(REDIS_URL)
-
-app = Client("file_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-user_upload_temp = defaultdict(dict)
-pending_purge = {}
-
-# ========== 工具 ==========
-def is_admin(user_id: int):
-    return user_id in ADMIN_IDS
-
-def upload_to_oss(file_path):
-    try:
-        ext = os.path.splitext(file_path)[1]
-        key = f"files/{uuid.uuid4()}{ext}"
-        bucket.put_object_from_file(key, file_path)
-        return key
-    except:
-        return None
-
-# ========== 用户功能 ==========
-@app.on_message(filters.command("start"))
-async def start(client, message):
-    welcome = """👋 欢迎使用永久文件保存机器人
-
-✅ 使用方法：
-直接发送 图片 / 文件 / 相册 即可自动上传
-
-📁 文件夹命名：
-• 上传后发送文字 = 设置文件夹名
-• 上传后发送 /skip = 不命名（默认未命名）
-
-🔗 获取下载链接：
-/get 提取码
-
-💡 所有提取码永久有效"""
-    await message.reply(welcome)
-
-# 图片/文件上传（必触发，不会卡住）
-@app.on_message(filters.media)
-async def upload_media(client, message):
-    uid = message.from_user.id
-    tmp = tempfile.mktemp()
-    await message.download(tmp)
-    
-    key = upload_to_oss(tmp)
-    os.remove(tmp)
-    
-    if not key:
-        await message.reply("❌ 上传失败")
-        return
-
-    user_upload_temp[uid] = {
-        "keys": [key],
-        "pending": True
-    }
-    await message.reply("📝 请输入文件夹名，或发送 /skip 跳过")
-
-# 文字 = 文件夹名
-@app.on_message(filters.text & filters.private)
-async def name_folder(client, message):
-    uid = message.from_user.id
-    if not user_upload_temp[uid].get("pending"):
-        return
-
-    folder = message.text.strip()
-    data = user_upload_temp[uid]
-    del user_upload_temp[uid]
-
-    code = uuid.uuid4().hex[:8].upper()
-    r.set(f"file:{code}", json.dumps({
-        "user_id": uid,
-        "keys": data["keys"],
-        "folder": folder
-    }))
-
-    await message.reply(f"✅ 保存成功\n📁 文件夹：{folder}\n📌 提取码：`{code}`\n🔗 /get {code}")
-
-# 跳过命名
-@app.on_message(filters.command("skip"))
-async def skip(client, message):
-    uid = message.from_user.id
-    if not user_upload_temp[uid].get("pending"):
-        await message.reply("❌ 请先上传文件")
-        return
-
-    data = user_upload_temp[uid]
-    del user_upload_temp[uid]
-    code = uuid.uuid4().hex[:8].upper()
-
-    r.set(f"file:{code}", json.dumps({
-        "user_id": uid,
-        "keys": data["keys"],
-        "folder": None
-    }))
-
-    await message.reply(f"✅ 保存成功\n📁 文件夹：未命名\n📌 提取码：`{code}`\n🔗 /get {code}")
-
-# 获取下载链接
-@app.on_message(filters.command("get"))
-async def get(client, message):
-    if len(message.command) < 2:
-        await message.reply("❌ 用法：/get 提取码")
-        return
-    code = message.command[1].upper()
-    data = r.get(f"file:{code}")
-    if not data:
-        await message.reply("❌ 提取码不存在")
-        return
-    d = json.loads(data)
-    if message.from_user.id != d["user_id"] and not is_admin(message.from_user.id):
-        await message.reply("❌ 无权限")
-        return
-    urls = [bucket.sign_url("GET", k, 3600) for k in d["keys"]]
-    folder = d.get("folder") or "未命名"
-    await message.reply(f"📁 文件夹：{folder}\n🔗 下载链接：\n" + "\n".join(urls))
-
-# ========== 管理员 ==========
-@app.on_message(filters.command("admin"))
-async def admin(client, message):
-    if not is_admin(message.from_user.id):
-        await message.reply("❌ 无权限")
-        return
-    txt = """🔐 管理员菜单
-/admin — 菜单
-/list — 全部记录
-/user ID — 查询用户
-/delete 码 — 删除
-/purge ID — 清空用户
-/confirm — 确认清空
-/stats — 统计
-/clean — 清理无效"""
-    await message.reply(txt)
-
-@app.on_message(filters.command("list"))
-async def list_all(client, message):
-    if not is_admin(message.from_user.id):
-        await message.reply("❌ 无权限")
-        return
-    keys = r.keys("file:*")
-    if not keys:
-        await message.reply("暂无记录")
-        return
-    lines = []
-    for k in keys:
-        code = k.decode().split(":")[1]
-        d = json.loads(r.get(k))
-        folder = d.get("folder") or "未命名"
-        lines.append(f"`{code}` | UID:{d['user_id']} | {len(d['keys'])}个 | {folder}")
-    await message.reply("\n".join(lines))
-
-@app.on_message(filters.command("user"))
-async def user_files(client, message):
-    if not is_admin(message.from_user.id):
-        await message.reply("❌ 无权限")
-        return
-    if len(message.command) < 2:
-        await message.reply("/user <ID>")
-        return
-    target = int(message.command[1])
-    allkeys = r.keys("file:*")
-    res = []
-    for k in allkeys:
-        d = json.loads(r.get(k))
-        if d["user_id"] == target:
-            code = k.decode().split(":")[1]
-            folder = d.get("folder") or "未命名"
-            res.append(f"`{code}` | {len(d['keys'])}个 | {folder}")
-    if not res:
-        await message.reply("无文件")
-        return
-    await message.reply("\n".join(res))
-
-@app.on_message(filters.command("delete"))
-async def delete_code(client, message):
-    if not is_admin(message.from_user.id):
-        await message.reply("❌ 无权限")
-        return
-    if len(message.command) < 2:
-        await message.reply("/delete <提取码>")
-        return
-    code = message.command[1].upper()
-    key = f"file:{code}"
-    data = r.get(key)
-    if not data:
-        await message.reply("不存在")
-        return
-    d = json.loads(data)
-    for f in d["keys"]:
+def get_oss_bucket() -> Optional[oss2.Bucket]:
+    """获取 OSS Bucket 实例，失败时返回 None 而不是崩溃"""
+    global _oss_bucket
+    if _oss_bucket is None:
         try:
-            bucket.delete_object(f)
-        except:
-            pass
-    r.delete(key)
-    await message.reply(f"✅ {code} 已删除")
+            auth = oss2.Auth(OSS_ACCESS_KEY, OSS_SECRET_KEY)
+            _oss_bucket = oss2.Bucket(auth, OSS_ENDPOINT, OSS_BUCKET)
+            # 测试连接
+            _oss_bucket.get_bucket_acl()
+            logger.info("✅ OSS Bucket 初始化成功")
+        except Exception as e:
+            logger.error(f"❌ OSS Bucket 初始化失败: {e}")
+            _oss_bucket = None
+    return _oss_bucket
 
-@app.on_message(filters.command("purge"))
-async def purge(client, message):
-    if not is_admin(message.from_user.id):
-        await message.reply("❌ 无权限")
-        return
-    if len(message.command) < 2:
-        await message.reply("/purge <ID>")
-        return
-    target = int(message.command[1])
-    pending_purge[message.from_user.id] = target
-    await message.reply(f"⚠️ 确定清空 {target}？发送 /confirm 确认")
+def upload_to_oss(file_path: str, object_name: str, max_retries: int = 3) -> bool:
+    """
+    上传文件到 OSS，带重试机制
+    :param file_path: 本地文件路径
+    :param object_name: OSS 中的对象名
+    :param max_retries: 最大重试次数
+    :return: 是否上传成功
+    """
+    bucket = get_oss_bucket()
+    if not bucket:
+        return False
 
-@app.on_message(filters.command("confirm"))
-async def confirm(client, message):
-    uid = message.from_user.id
-    if not is_admin(uid):
-        await message.reply("❌ 无权限")
-        return
-    if uid not in pending_purge:
-        await message.reply("❌ 无待确认操作")
-        return
-    target = pending_purge[uid]
-    del pending_purge[uid]
-    allkeys = r.keys("file:*")
-    cnt_code = 0
-    cnt_file = 0
-    for k in allkeys:
-        d = json.loads(r.get(k))
-        if d["user_id"] == target:
-            for f in d["keys"]:
-                try:
-                    bucket.delete_object(f)
-                    cnt_file += 1
-                except:
-                    pass
-            r.delete(k)
-            cnt_code += 1
-    await message.reply(f"🗑️ 清空完成\n用户：{target}\n提取码：{cnt_code}\n文件：{cnt_file}")
+    for attempt in range(max_retries):
+        try:
+            with open(file_path, 'rb') as f:
+                result = bucket.put_object(object_name, f)
+            if result.status == 200:
+                logger.info(f"✅ 文件 {object_name} 上传成功")
+                return True
+            else:
+                logger.warning(f"⚠️ 第 {attempt+1} 次上传失败，状态码: {result.status}")
+        except Exception as e:
+            logger.error(f"❌ 第 {attempt+1} 次上传异常: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)  # 指数退避重试
+    return False
 
-@app.on_message(filters.command("stats"))
-async def stats(client, message):
-    if not is_admin(message.from_user.id):
-        await message.reply("❌ 无权限")
-        return
-    codes = len(r.keys("file:*"))
-    await message.reply(f"📊 提取码总数：{codes}")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="👋 你好！我是文件存储机器人，直接发送文件给我即可上传到 OSS。"
+    )
 
-@app.on_message(filters.command("clean"))
-async def clean(client, message):
-    if not is_admin(message.from_user.id):
-        await message.reply("❌ 无权限")
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    file: File = update.message.document or update.message.photo[-1] or update.message.video
+    if not file:
+        await update.message.reply_text("❌ 无法识别的文件类型")
         return
-    keys = r.keys("file:*")
-    bad = 0
-    for k in keys:
-        if not r.get(k):
-            r.delete(k)
-            bad += 1
-    await message.reply(f"🧹 清理无效记录：{bad}")
 
-if __name__ == "__main__":
-    app.run()
+    # 检查文件大小
+    if file.file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
+        await update.message.reply_text(f"❌ 文件过大，最大支持 {MAX_FILE_SIZE_MB}MB")
+        return
+
+    # 下载文件到本地临时目录
+    try:
+        file_path = await file.download_to_drive()
+        logger.info(f"✅ 文件 {file.file_name} 下载到本地成功")
+    except Exception as e:
+        logger.error(f"❌ 文件下载失败: {e}")
+        await update.message.reply_text("❌ 文件下载失败，请重试")
+        return
+
+    # 生成 OSS 对象名（用户ID/时间戳_文件名）
+    timestamp = int(time.time())
+    object_name = f"{user_id}/{timestamp}_{file.file_name}"
+
+    # 上传到 OSS
+    if upload_to_oss(file_path, object_name):
+        # 上传成功，删除本地临时文件
+        os.unlink(file_path)
+        await update.message.reply_text(f"✅ 文件上传成功！\nOSS 路径: `{object_name}`")
+    else:
+        os.unlink(file_path)
+        await update.message.reply_text("❌ 文件上传到 OSS 失败，请稍后重试")
+
+def main():
+    # 校验必填配置
+    if not all([TELEGRAM_BOT_TOKEN, OSS_ACCESS_KEY, OSS_SECRET_KEY, DATABASE_URL]):
+        raise ValueError("❌ 关键环境变量缺失，请检查 Railway 配置")
+    logger.info("✅ 所有配置校验通过")
+
+    # 初始化 OSS
+    get_oss_bucket()
+
+    # 启动 Telegram Bot
+    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # 注册处理器
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_file))
+
+    # 启动轮询
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
