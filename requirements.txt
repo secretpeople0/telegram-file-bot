@@ -1,2 +1,4 @@
-python-telegram-bot==13.7
+python = ">=3.10,<3.13"
+python-telegram-bot==20.7
 oss2==2.18.1
+pillow==10.2.0
