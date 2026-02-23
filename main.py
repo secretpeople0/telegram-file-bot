@@ -2,6 +2,7 @@ import os
 import logging
 import random
 import string
+import sqlite3
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -12,8 +13,6 @@ from telegram.ext import (
     filters,
     ConversationHandler
 )
-import psycopg2
-import psycopg2.extras
 import oss2
 
 logging.basicConfig(
@@ -28,7 +27,7 @@ OSS_SECRET_KEY = os.getenv("OSS_SECRET_KEY")
 OSS_ENDPOINT = os.getenv("OSS_ENDPOINT")
 OSS_BUCKET = os.getenv("OSS_BUCKET")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_FILE = "/app/bot.db"  # SQLite 数据库文件路径
 
 WAITING_FOR_NAME = 1
 BANNED_USERS = set()
@@ -37,28 +36,30 @@ auth = oss2.Auth(OSS_ACCESS_KEY, OSS_SECRET_KEY)
 bucket = oss2.Bucket(auth, OSS_ENDPOINT, OSS_BUCKET)
 
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+    conn = sqlite3.connect(DATABASE_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def init_db():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute('''CREATE TABLE IF NOT EXISTS user_files
-                       (id SERIAL PRIMARY KEY,
-                        user_id BIGINT NOT NULL,
+                       (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
                         code TEXT UNIQUE NOT NULL,
                         name TEXT,
                         file_paths TEXT NOT NULL,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         cur.execute('''CREATE TABLE IF NOT EXISTS banned_users
-                       (user_id BIGINT PRIMARY KEY,
+                       (user_id INTEGER PRIMARY KEY,
                         banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         conn.commit()
         cur.close()
         conn.close()
-        logger.info("✅ 数据库初始化成功")
-    except:
-        logger.warning("⚠️ 数据库初始化失败，但继续运行")
+        logger.info("✅ SQLite 数据库初始化成功")
+    except Exception as e:
+        logger.error(f"❌ 数据库初始化失败: {e}")
 
 def is_banned(user_id):
     if user_id in BANNED_USERS:
@@ -66,7 +67,7 @@ def is_banned(user_id):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT 1 FROM banned_users WHERE user_id = %s", (user_id,))
+        cur.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,))
         res = cur.fetchone() is not None
         cur.close()
         conn.close()
@@ -83,7 +84,7 @@ def generate_unique_code(length=8):
         try:
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute("SELECT 1 FROM user_files WHERE code = %s", (code,))
+            cur.execute("SELECT 1 FROM user_files WHERE code = ?", (code,))
             if cur.fetchone() is None:
                 cur.close()
                 conn.close()
@@ -103,7 +104,8 @@ async def upload_files_to_oss(file_paths, user_id, code):
                 bucket.put_object(oss_path, f)
             oss_paths.append(oss_path)
             os.remove(fp)
-        except:
+        except Exception as e:
+            logger.error(f"❌ OSS 上传失败: {e}")
             return None
     return ','.join(oss_paths)
 
@@ -121,13 +123,13 @@ async def myfiles(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        cur.execute("SELECT code,name,created_at FROM user_files WHERE user_id=%s ORDER BY created_at DESC", (u.id,))
+        cur = conn.cursor()
+        cur.execute("SELECT code, name, created_at FROM user_files WHERE user_id = ? ORDER BY created_at DESC", (u.id,))
         rows = cur.fetchall()
         cur.close()
         conn.close()
-    except:
-        await update.message.reply_text("⚠️ 数据库异常")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ 数据库异常: {e}")
         return
     if not rows:
         await update.message.reply_text("📂 暂无文件")
@@ -160,7 +162,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ 已收 {len(context.user_data['file_queue'])} 个文件，等待生成提取码...")
         context.job_queue.run_once(do_gen_code, 6, user_id=u.id, data=context.user_data)
     except Exception as e:
-        logger.error(e)
+        logger.error(f"❌ 文件处理失败: {e}")
         await update.message.reply_text("❌ 处理失败")
 
 async def do_gen_code(ctx):
@@ -177,13 +179,13 @@ async def do_gen_code(ctx):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("INSERT INTO user_files (user_id,code,name,file_paths) VALUES (%s,%s,%s,%s)",
+        cur.execute("INSERT INTO user_files (user_id, code, name, file_paths) VALUES (?, ?, ?, ?)",
                     (uid, code, None, paths))
         conn.commit()
         cur.close()
         conn.close()
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"❌ 数据库写入失败: {e}")
     kb = [
         [InlineKeyboardButton("命名", callback_data=f"name_{code}")],
         [InlineKeyboardButton("跳过", callback_data=f"skip_{code}")]
@@ -202,13 +204,13 @@ async def btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute("DELETE FROM user_files WHERE code=%s AND user_id=%s", (code, uid))
+            cur.execute("DELETE FROM user_files WHERE code = ? AND user_id = ?", (code, uid))
             conn.commit()
             cur.close()
             conn.close()
             await q.edit_message_text(f"🗑️ 已删除 `{code}`", parse_mode='Markdown')
-        except:
-            await q.edit_message_text("❌ 删除失败")
+        except Exception as e:
+            await q.edit_message_text(f"❌ 删除失败: {e}")
         return
     if data.startswith('name_'):
         code = data[5:]
@@ -227,14 +229,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute("UPDATE user_files SET name=%s WHERE code=%s AND user_id=%s",
+            cur.execute("UPDATE user_files SET name = ? WHERE code = ? AND user_id = ?",
                         (name, code, update.effective_user.id))
             conn.commit()
             cur.close()
             conn.close()
             await update.message.reply_text(f"✅ `{code}` 已命名：{name}", parse_mode='Markdown')
-        except:
-            await update.message.reply_text("❌ 命名失败")
+        except Exception as e:
+            await update.message.reply_text(f"❌ 命名失败: {e}")
         return ConversationHandler.END
     await update.message.reply_text("📤 发送文件即可存储")
 
