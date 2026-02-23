@@ -1,6 +1,6 @@
 import os
-import random
 import json
+import random
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -12,192 +12,163 @@ from telegram.ext import (
     filters
 )
 
-# ====================== 配置区 ======================
+# ====================== 配置 ======================
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
 
-STORAGE_FILE = "database.json"
-BAN_FILE = "banned_users.json"
-
 user_sessions = {}
-pending_naming = {}  # 正在命名的用户
-db = {}
+pending_naming = {}
+
+# ====================== 永久存储核心 ======================
+def get_db():
+    data = os.environ.get("BOT_DB", "{}")
+    try:
+        return json.loads(data)
+    except:
+        return {}
+
+def save_db(db_data):
+    os.environ["BOT_DB"] = json.dumps(db_data, ensure_ascii=False, indent=2)
+
+db = get_db()
+
+# ====================== 封禁 ======================
 banned_users = []
-
-# ====================== 数据库 ======================
-def init_db():
-    if not os.path.exists(STORAGE_FILE):
-        with open(STORAGE_FILE, "w", encoding="utf-8") as f:
-            json.dump({}, f)
-    with open(STORAGE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def init_banned():
-    if not os.path.exists(BAN_FILE):
-        with open(BAN_FILE, "w", encoding="utf-8") as f:
-            json.dump([], f)
-    with open(BAN_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-db = init_db()
-banned_users = init_banned()
-
-def save_db():
-    with open(STORAGE_FILE, "w", encoding="utf-8") as f:
-        json.dump(db, f, ensure_ascii=False, indent=2)
+try:
+    banned_users = json.loads(os.environ.get("BOT_BANNED", "[]"))
+except:
+    banned_users = []
 
 def save_banned():
-    with open(BAN_FILE, "w", encoding="utf-8") as f:
-        json.dump(banned_users, f, ensure_ascii=False, indent=2)
+    os.environ["BOT_BANNED"] = json.dumps(banned_users, ensure_ascii=False)
 
 # ====================== 封禁检查 ======================
 def check_ban(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        if user_id in banned_users:
-            await update.message.reply_text("❌ 你已被封禁，无法使用本机器人。")
+        if update.effective_user.id in banned_users:
+            await update.message.reply_text("❌ 你已被封禁。")
             return
         return await func(update, context)
     return wrapper
 
 # ====================== 管理员 ======================
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID:
-        await update.message.reply_text("❌ 你没有管理员权限")
+    if update.effective_user.id != ADMIN_USER_ID:
         return
-
     keyboard = [
-        [InlineKeyboardButton("📊 统计总数", callback_data="admin_stats")],
-        [InlineKeyboardButton("🔍 搜索文件", callback_data="admin_search")],
-        [InlineKeyboardButton("🗑️ 删除文件", callback_data="admin_delete")],
-        [InlineKeyboardButton("🚫 封禁/解封用户", callback_data="admin_ban")],
-        [InlineKeyboardButton("👤 查看上传者详情", callback_data="admin_view_uploader")],
+        [InlineKeyboardButton("📊 统计", callback_data="stats")],
+        [InlineKeyboardButton("🔍 搜索", callback_data="search")],
+        [InlineKeyboardButton("🗑️ 删除", callback_data="delete")],
+        [InlineKeyboardButton("🚫 封禁", callback_data="ban")],
+        [InlineKeyboardButton("👤 查看用户", callback_data="user")],
     ]
-    await update.message.reply_text("👮 管理员控制面板", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("👮 管理面板", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    if user_id != ADMIN_USER_ID:
-        await query.edit_message_text("❌ 权限不足")
+    q = update.callback_query
+    await q.answer()
+    if q.from_user.id != ADMIN_USER_ID:
         return
+    if q.data == "stats":
+        t = len(db)
+        f = sum(len(i["files"]) for i in db.values())
+        await q.edit_message_text(f"📊 打包：{t}\n文件：{f}")
+    elif q.data == "search":
+        await q.edit_message_text("🔍 发关键词")
+        context.user_data["act"] = "search"
+    elif q.data == "delete":
+        await q.edit_message_text("🗑️ 发提取码")
+        context.user_data["act"] = "del"
+    elif q.data == "ban":
+        await q.edit_message_text("🚫 发用户ID 或 /unban ID")
+        context.user_data["act"] = "ban"
+    elif q.data == "user":
+        await q.edit_message_text("👤 发用户ID")
+        context.user_data["act"] = "user"
 
-    if query.data == "admin_stats":
-        total_packages = len(db)
-        total_files = sum(len(pkg["files"]) for pkg in db.values())
-        await query.edit_message_text(f"📊 存储统计\n打包总数：{total_packages} 个\n文件总数：{total_files} 个")
-
-    elif query.data == "admin_search":
-        await query.edit_message_text("🔍 请回复你要搜索的文件名关键词：")
-        context.user_data["admin_action"] = "search"
-
-    elif query.data == "admin_delete":
-        await query.edit_message_text("🗑️ 请回复要删除的提取码：")
-        context.user_data["admin_action"] = "delete"
-
-    elif query.data == "admin_ban":
-        await query.edit_message_text("🚫 请回复用户ID（封禁）或 /unban [用户ID]（解封）：")
-        context.user_data["admin_action"] = "ban"
-
-    elif query.data == "admin_view_uploader":
-        await query.edit_message_text("👤 请回复要查看的用户ID：")
-        context.user_data["admin_action"] = "view_uploader"
-
-async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID or "admin_action" not in context.user_data:
+async def admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "act" not in context.user_data:
         return
+    uid = update.effective_user.id
+    if uid != ADMIN_USER_ID:
+        return
+    act = context.user_data["act"]
+    txt = update.message.text.strip()
+    db = get_db()
 
-    action = context.user_data["admin_action"]
-    text = update.message.text.strip()
-
-    if action == "search":
-        results = []
+    if act == "search":
+        res = []
         for code, pkg in db.items():
             for f in pkg["files"]:
-                if text.lower() in f["name"].lower():
-                    results.append(f"🔑 提取码：`{code}`\n📦 包名：`{pkg.get('name', '未命名')}`\n📄 文件：`{f['name']}`\n👤 {pkg['uploader']['name']}\n⏰ {pkg['time']}\n")
-        await update.message.reply_text(f"✅ 找到 {len(results)} 条结果\n\n" + "\n".join(results) if results else "❌ 无结果", parse_mode="Markdown")
-
-    elif action == "delete":
-        if text in db:
-            del db[text]
-            save_db()
-            await update.message.reply_text(f"✅ 删除 {text} 成功")
+                if txt.lower() in f["name"].lower():
+                    res.append(f"🔑 {code}\n📦 {pkg.get('name','未命名')}\n📄 {f['name']}")
+        await update.message.reply_text("\n\n".join(res) if res else "❌ 无结果")
+    elif act == "del":
+        if txt in db:
+            del db[txt]
+            save_db(db)
+            await update.message.reply_text("✅ 删除成功")
         else:
-            await update.message.reply_text("❌ 提取码不存在")
-
-    elif action == "ban":
+            await update.message.reply_text("❌ 不存在")
+    elif act == "ban":
         try:
-            if text.startswith("/unban"):
-                uid = int(text.split()[1])
-                if uid in banned_users:
-                    banned_users.remove(uid)
+            if txt.startswith("/unban"):
+                id = int(txt.split()[1])
+                if id in banned_users:
+                    banned_users.remove(id)
                     save_banned()
-                    await update.message.reply_text(f"✅ 已解封 {uid}")
-                else:
-                    await update.message.reply_text("❌ 未封禁")
+                    await update.message.reply_text("✅ 已解封")
             else:
-                uid = int(text)
-                if uid not in banned_users:
-                    banned_users.append(uid)
+                id = int(txt)
+                if id not in banned_users:
+                    banned_users.append(id)
                     save_banned()
-                    await update.message.reply_text(f"✅ 已封禁 {uid}")
+                    await update.message.reply_text("✅ 已封禁")
         except:
             await update.message.reply_text("❌ 格式错误")
-
-    elif action == "view_uploader":
+    elif act == "user":
         try:
-            uid = int(text)
+            target = int(txt)
             res = []
             for code, pkg in db.items():
-                if pkg["uploader"]["id"] == uid:
-                    res.append(f"🔑 `{code}`\n📦 {pkg.get('name','未命名')} | {len(pkg['files'])}个文件")
-            await update.message.reply_text("\n\n".join(res) if res else "❌ 无上传记录", parse_mode="Markdown")
+                if pkg["uploader"]["id"] == target:
+                    res.append(f"🔑 {code} | {pkg.get('name','未命名')}")
+            await update.message.reply_text("\n".join(res) if res else "❌ 无记录")
         except:
-            await update.message.reply_text("❌ 输入正确用户ID")
-
-    del context.user_data["admin_action"]
+            await update.message.reply_text("❌ 错误")
+    del context.user_data["act"]
 
 # ====================== 用户功能 ======================
 @check_ban
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 发送文件 → /confirm 打包 → 命名 → 获取提取码")
+    await update.message.reply_text("👋 发文件 → /confirm → 命名 → 获取提取码")
 
 @check_ban
-async def collect_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     msg = update.message
-
     if uid not in user_sessions:
         user_sessions[uid] = []
-
     f = None
     if msg.document:
         f = {"type":"doc","id":msg.document.file_id,"name":msg.document.file_name or "文件"}
     elif msg.photo:
-        f = {"type":"img","id":msg.photo[-1].file_id,"name":f"图{datetime.now().strftime('%H%M%S')}"}
-
+        f = {"type":"img","id":msg.photo[-1].file_id,"name":f"图片{datetime.now().strftime('%M%S')}"}
     if not f:
-        await msg.reply_text("❌ 仅支持图片/文件")
         return
-
     user_sessions[uid].append(f)
-    await msg.reply_text(f"✅ 已收：{len(user_sessions[uid])} 个\n输入 /confirm 打包")
+    await msg.reply_text(f"✅ 已收 {len(user_sessions[uid])} 个\n输入 /confirm 打包")
 
 @check_ban
-async def confirm_package(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid not in user_sessions or not user_sessions[uid]:
-        await update.message.reply_text("❌ 你还没上传文件")
+        await update.message.reply_text("❌ 未上传文件")
         return
-
+    db = get_db()
     while True:
         code = str(random.randint(100000,999999))
         if code not in db: break
-
     pending_naming[uid] = {
         "code": code,
         "files": user_sessions[uid],
@@ -205,36 +176,34 @@ async def confirm_package(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     del user_sessions[uid]
-    await update.message.reply_text(f"📦 打包成功！\n🔑 提取码：`{code}`\n请输入包名，或 /skip 跳过", parse_mode="Markdown")
+    await update.message.reply_text(f"📦 打包成功！\n🔑 {code}\n请输入名称 或 /skip 跳过")
 
+# ====================== 统一文本处理（修复命名） ======================
 @check_ban
-async def handle_text_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    text = update.message.text.strip()
+    txt = update.message.text.strip()
+    db = get_db()
 
-    # ———— 【修复】：如果正在命名，优先处理 ————
+    # 正在命名
     if uid in pending_naming:
         pkg = pending_naming[uid]
-        if text == "/skip":
-            pkg["name"] = "未命名"
-        else:
-            pkg["name"] = text[:50]
-
+        pkg["name"] = txt if txt != "/skip" else "未命名"
         db[pkg["code"]] = pkg
-        save_db()
+        save_db(db)
         del pending_naming[uid]
-        await update.message.reply_text(f"✅ 完成！\n📦 包名：`{pkg['name']}`\n🔑 提取码：`{pkg['code']}`", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ 完成！\n📦 {pkg['name']}\n🔑 {pkg['code']}")
         return
 
-    # ———— 管理员操作 ————
-    if uid == ADMIN_USER_ID and "admin_action" in context.user_data:
-        await handle_admin_text(update, context)
+    # 管理员
+    if "act" in context.user_data:
+        await admin_text(update, context)
         return
 
-    # ———— 提取码 ————
-    if text in db:
-        pkg = db[text]
-        await update.message.reply_text(f"📦 正在取回：{pkg.get('name','未命名')}")
+    # 提取码
+    if txt in db:
+        pkg = db[txt]
+        await update.message.reply_text(f"📦 {pkg.get('name','未命名')}")
         for f in pkg["files"]:
             try:
                 if f["type"] == "img":
@@ -242,20 +211,17 @@ async def handle_text_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     await update.message.reply_document(f["id"], filename=f["name"])
             except:
-                await update.message.reply_text(f"⚠️ 文件发送失败")
-        return
+                await update.message.reply_text("⚠️ 发送失败")
 
 # ====================== 启动 ======================
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("confirm", confirm_package))
+    app.add_handler(CommandHandler("confirm", confirm))
     app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(MessageHandler(filters.ATTACHMENT, collect_files))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_all))
+    app.add_handler(MessageHandler(filters.ATTACHMENT, upload))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_text))
     app.add_handler(CallbackQueryHandler(admin_callback))
-
     app.run_polling()
 
 if __name__ == "__main__":
