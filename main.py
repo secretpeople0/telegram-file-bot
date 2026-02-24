@@ -17,49 +17,55 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
 BACKUP_INTERVAL = 30 * 60  # 30分钟自动备份一次
-MAX_BACKUP_COUNT = 2       # 只保留最近2个备份（你要的）
+MAX_BACKUP_COUNT = 2       # 只保留最近2个备份
 
 # 临时会话存储
 user_sessions = {}
 pending_naming = {}
 
-# ====================== 自动备份目录 ======================
-if not os.path.exists("backup"):
-    os.makedirs("backup")
+# ====================== 数据目录 ======================
+DATA_DIR = "/data"
+BACKUP_DIR = os.path.join(DATA_DIR, "backup")
+
+# 确保数据目录存在
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
+if not os.path.exists(BACKUP_DIR):
+    os.makedirs(BACKUP_DIR)
 
 # ====================== 文件存储（永久不丢） ======================
 def get_db():
     try:
-        with open("bot_db.json", "r", encoding="utf-8") as f:
+        with open(os.path.join(DATA_DIR, "bot_db.json"), "r", encoding="utf-8") as f:
             return json.load(f)
     except:
         return {}
 
 def save_db(db_data):
-    with open("bot_db.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(DATA_DIR, "bot_db.json"), "w", encoding="utf-8") as f:
         json.dump(db_data, f, ensure_ascii=False, indent=2)
     auto_backup()
 
 def get_banned():
     try:
-        with open("banned.json", "r", encoding="utf-8") as f:
+        with open(os.path.join(DATA_DIR, "banned.json"), "r", encoding="utf-8") as f:
             return json.load(f)
     except:
         return []
 
 def save_banned(banned_list):
-    with open("banned.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(DATA_DIR, "banned.json"), "w", encoding="utf-8") as f:
         json.dump(banned_list, f, ensure_ascii=False)
 
 def get_user_index():
     try:
-        with open("user_index.json", "r", encoding="utf-8") as f:
+        with open(os.path.join(DATA_DIR, "user_index.json"), "r", encoding="utf-8") as f:
             return json.load(f)
     except:
         return {}
 
 def save_user_index(index_data):
-    with open("user_index.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(DATA_DIR, "user_index.json"), "w", encoding="utf-8") as f:
         json.dump(index_data, f, ensure_ascii=False, indent=2)
 
 # ====================== 备份 + 自动清理旧备份 ======================
@@ -67,16 +73,17 @@ def backup_now():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     files = ["bot_db.json", "banned.json", "user_index.json"]
     for f in files:
-        if os.path.exists(f):
-            shutil.copy(f, f"backup/{f}.{timestamp}")
+        src = os.path.join(DATA_DIR, f)
+        dst = os.path.join(BACKUP_DIR, f"{f}.{timestamp}")
+        if os.path.exists(src):
+            shutil.copy(src, dst)
     auto_clean_old_backups()
     return timestamp
 
 def auto_clean_old_backups():
-    backup_dir = "backup"
     backup_files = []
-    for f in os.listdir(backup_dir):
-        path = os.path.join(backup_dir, f)
+    for f in os.listdir(BACKUP_DIR):
+        path = os.path.join(BACKUP_DIR, f)
         if os.path.isfile(path):
             backup_files.append((os.path.getmtime(path), path))
     backup_files.sort(reverse=True)
@@ -111,12 +118,15 @@ async def get_db_file(update: Update, context: ContextTypes):
     if user_id != ADMIN_USER_ID:
         await update.message.reply_text("❌ 无权限")
         return
-    if os.path.exists("bot_db.json"):
-        await update.message.reply_document(document=open("bot_db.json", "rb"))
-    if os.path.exists("banned.json"):
-        await update.message.reply_document(document=open("banned.json", "rb"))
-    if os.path.exists("user_index.json"):
-        await update.message.reply_document(document=open("user_index.json", "rb"))
+    db_path = os.path.join(DATA_DIR, "bot_db.json")
+    banned_path = os.path.join(DATA_DIR, "banned.json")
+    user_index_path = os.path.join(DATA_DIR, "user_index.json")
+    if os.path.exists(db_path):
+        await update.message.reply_document(document=open(db_path, "rb"))
+    if os.path.exists(banned_path):
+        await update.message.reply_document(document=open(banned_path, "rb"))
+    if os.path.exists(user_index_path):
+        await update.message.reply_document(document=open(user_index_path, "rb"))
 
 banned_users = get_banned()
 
@@ -164,7 +174,7 @@ async def admin_panel(update: Update, context: ContextTypes):
 async def admin_callback(update: Update, context: ContextTypes):
     query = update.callback_query
     await query.answer()
-    user_id = query.from.id
+    user_id = query.from_user.id
     if user_id != ADMIN_USER_ID:
         await query.edit_message_text("❌ 权限不足")
         return
