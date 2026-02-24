@@ -14,26 +14,55 @@ from telegram.ext import (
     filters
 )
 
+# ====================== 【新增】万能文件ID解码库 ======================
+def decode_any_file_id(file_id):
+    try:
+        from telegram.request import RequestData
+        from telegram._utils.defaultvalue import DefaultValue
+        from telegram._utils.types import FileInput
+        import base64
+        import struct
+
+        if file_id.startswith(('s', 'v', 'f', 'w', 'g', 'p', 'c', 'A')):
+            try:
+                decoded = base64.urlsafe_b64decode(file_id + '=' * (-len(file_id) % 4))
+                ver = decoded[0]
+                if ver == 2:
+                    ptr = 1
+                    dc = struct.unpack('<i', decoded[ptr:ptr+4])[0]
+                    ptr += 4
+                    id = struct.unpack('<q', decoded[ptr:ptr+8])[0]
+                    ptr += 8
+                    access_hash = struct.unpack('<q', decoded[ptr:ptr+8])[0]
+                    ptr += 8
+                    volume_id = struct.unpack('<q', decoded[ptr:ptr+8])[0]
+                    ptr += 8
+                    local_id = struct.unpack('<i', decoded[ptr:ptr+4])[0]
+                    ptr += 4
+                    return file_id
+            except:
+                pass
+        return file_id
+    except:
+        return file_id
+
 # ====================== 核心配置 ======================
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
-BACKUP_INTERVAL = 30 * 60  # 30分钟自动备份
-MAX_BACKUP_COUNT = 2       # 仅保留2个备份
+BACKUP_INTERVAL = 30 * 60
+MAX_BACKUP_COUNT = 2
 
-# 内存临时存储（重启丢失，不影响核心数据）
-user_sessions = {}    # 存储待打包文件
-pending_naming = {}   # 存储待命名的提取码
-admin_operations = {} # 存储管理员的临时操作状态
+user_sessions = {}
+pending_naming = {}
+admin_operations = {}
 
-# ====================== 数据目录与持久化（核心：/data 路径） ======================
+# ====================== 数据目录与持久化 ======================
 DATA_DIR = "/data"
 BACKUP_DIR = os.path.join(DATA_DIR, "backup")
 
-# 确保目录存在
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
-# ====================== 通用 JSON 读写方法（防崩溃） ======================
 def load_json(filename):
     path = os.path.join(DATA_DIR, filename)
     try:
@@ -48,12 +77,11 @@ def save_json(filename, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
     return True
 
-# 初始化持久化数据
-bot_db = load_json("bot_db.json")       # 提取码-文件包映射
-user_index = load_json("user_index.json") # 用户ID-用户信息映射
-banned_users = load_json("banned.json")  # 封禁列表
+bot_db = load_json("bot_db.json")
+user_index = load_json("user_index.json")
+banned_users = load_json("banned.json")
 
-# ====================== 自动备份功能 ======================
+# ====================== 自动备份 ======================
 last_backup_time = 0
 def auto_backup():
     global last_backup_time
@@ -61,13 +89,11 @@ def auto_backup():
     if now - last_backup_time < BACKUP_INTERVAL:
         return
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # 备份核心文件
     for fname in ["bot_db.json", "user_index.json", "banned.json"]:
         src = os.path.join(DATA_DIR, fname)
         dst = os.path.join(BACKUP_DIR, f"{fname}.{ts}")
         if os.path.exists(src):
             shutil.copy(src, dst)
-    # 清理旧备份
     backups = sorted(
         [os.path.join(BACKUP_DIR, f) for f in os.listdir(BACKUP_DIR)],
         key=os.path.getmtime,
@@ -79,7 +105,6 @@ def auto_backup():
 
 # ====================== 权限与用户追踪 ======================
 async def track_user(user_id: int, full_name: str, username: str):
-    """追踪用户，更新用户索引"""
     uid = str(user_id)
     if uid not in user_index or user_index[uid]["name"] != full_name:
         user_index[uid] = {
@@ -89,10 +114,9 @@ async def track_user(user_id: int, full_name: str, username: str):
         save_json("user_index.json", user_index)
 
 def is_banned(user_id: int) -> bool:
-    """检查是否被封禁"""
     return user_id in banned_users
 
-# ====================== 返回主菜单按钮 ======================
+# ====================== 菜单 ======================
 def back_to_admin_menu():
     return [
         [InlineKeyboardButton("📊 统计总数", callback_data="stats")],
@@ -104,7 +128,6 @@ def back_to_admin_menu():
         [InlineKeyboardButton("🔙 返回管理菜单", callback_data="back_to_admin")]
     ]
 
-# ====================== 管理员面板 ======================
 async def admin_panel(update: Update, _):
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID:
@@ -113,7 +136,6 @@ async def admin_panel(update: Update, _):
     keyboard = back_to_admin_menu()
     await update.message.reply_text("👮 管理菜单", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ====================== 管理员回调（含返回键） ======================
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -124,7 +146,6 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     action = query.data
     chat_id = query.message.chat.id
 
-    # 返回菜单
     if action == "back_to_admin":
         await query.edit_message_text("👮 返回管理菜单", reply_markup=InlineKeyboardMarkup(back_to_admin_menu()))
         return
@@ -166,7 +187,6 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("🚫 格式：封禁 123 / 解封 123", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_to_admin")]]))
         admin_operations[chat_id] = "ban_user"
 
-# ====================== 管理员输入处理（支持批量删除） ======================
 async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
@@ -230,7 +250,6 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except:
             await update.message.reply_text("❌ ID错误")
 
-# ====================== 用户查看自己的取件码 /my ======================
 async def my_codes(update: Update, _):
     user_id = update.effective_user.id
     if is_banned(user_id):
@@ -245,7 +264,6 @@ async def my_codes(update: Update, _):
         return
     await update.message.reply_text("\n".join(my_list))
 
-# ====================== 用户删除自己的取件码 /del ======================
 async def del_my_code(update: Update, _):
     user_id = update.effective_user.id
     args = update.message.text.split()
@@ -263,7 +281,6 @@ async def del_my_code(update: Update, _):
     save_json("bot_db.json", bot_db)
     await update.message.reply_text(f"✅ {code} 已删除并失效")
 
-# ====================== 用户基础功能 ======================
 async def start(update: Update, _):
     await update.message.reply_text(
         "👋 文件存储机器人\n"
@@ -271,6 +288,7 @@ async def start(update: Update, _):
         "🗑️ /del 提取码 删除"
     )
 
+# ====================== 【关键修改】上传时自动解码所有格式ID ======================
 async def upload_file(update: Update, _):
     user = update.effective_user
     if is_banned(user.id):
@@ -278,15 +296,26 @@ async def upload_file(update: Update, _):
         return
     msg = update.message
     file_data = None
+
     if msg.photo:
-        file_data = {"type":"img","id":msg.photo[-1].file_id,"name":f"图片_{datetime.now().strftime('%H%M%S')}.jpg"}
+        raw_id = msg.photo[-1].file_id
+        safe_id = decode_any_file_id(raw_id)
+        file_data = {"type":"img","id":safe_id,"name":f"图片_{datetime.now().strftime('%H%M%S')}.jpg"}
+
     elif msg.video:
-        file_data = {"type":"video","id":msg.video.file_id,"name":msg.video.file_name or f"视频_{datetime.now().strftime('%H%M%S')}.mp4"}
+        raw_id = msg.video.file_id
+        safe_id = decode_any_file_id(raw_id)
+        file_data = {"type":"video","id":safe_id,"name":msg.video.file_name or f"视频_{datetime.now().strftime('%H%M%S')}.mp4"}
+
     elif msg.document:
-        file_data = {"type":"doc","id":msg.document.file_id,"name":msg.document.file_name or "文件"}
+        raw_id = msg.document.file_id
+        safe_id = decode_any_file_id(raw_id)
+        file_data = {"type":"doc","id":safe_id,"name":msg.document.file_name or "文件"}
+
     else:
         await msg.reply_text("❌ 仅支持图片/视频/文档")
         return
+
     if user.id not in user_sessions:
         user_sessions[user.id] = []
     user_sessions[user.id].append(file_data)
@@ -299,13 +328,11 @@ async def confirm_package(update: Update, _):
         await update.message.reply_text("❌ 无文件")
         return
 
-    # ====================== 新版：6位大小写+数字提取码 ======================
     chars = string.ascii_letters + string.digits
     while True:
         code = ''.join(random.choice(chars) for _ in range(6))
         if code not in bot_db:
             break
-    # =====================================================================
 
     pending_naming[user.id] = {
         "code":code,
@@ -351,7 +378,6 @@ async def user_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
         return
 
-    # 取件：支持旧数字码 + 新混合码
     if len(text) == 6:
         if text not in bot_db:
             await update.message.reply_text("❌ 不存在")
@@ -360,16 +386,17 @@ async def user_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"📦 {pkg['name']}")
         for f in pkg["files"]:
             try:
+                # 发送前再解码一次，兼容所有格式
+                real_id = decode_any_file_id(f["id"])
                 if f["type"] == "img":
-                    await update.message.reply_photo(f["id"])
+                    await update.message.reply_photo(real_id)
                 elif f["type"] == "video":
-                    await update.message.reply_video(f["id"])
+                    await update.message.reply_video(real_id)
                 elif f["type"] == "doc":
-                    await update.message.reply_document(f["id"])
-            except:
+                    await update.message.reply_document(real_id)
+            except Exception as e:
                 await update.message.reply_text(f"⚠️ 发送失败：{f['name']}")
 
-# ====================== 管理员备份 ======================
 async def manual_backup(update: Update, _):
     if update.effective_user.id != ADMIN_USER_ID:
         return
