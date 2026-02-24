@@ -17,7 +17,7 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
 BACKUP_INTERVAL = 30 * 60  # 30分钟自动备份一次
-MAX_BACKUP_COUNT = 10      # 只保留最近10个备份，多余自动删除
+MAX_BACKUP_COUNT = 2       # 只保留最近2个备份（你要的）
 
 # 临时会话存储
 user_sessions = {}
@@ -164,7 +164,7 @@ async def admin_panel(update: Update, context: ContextTypes):
 async def admin_callback(update: Update, context: ContextTypes):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
+    user_id = query.from.id
     if user_id != ADMIN_USER_ID:
         await query.edit_message_text("❌ 权限不足")
         return
