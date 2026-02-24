@@ -67,7 +67,6 @@ async def track_user(update: Update):
     user_id = str(user.id)
     index = get_user_index()
     
-    # 只在用户不存在或昵称变更时更新
     if user_id not in index or index[user_id]["name"] != user.full_name:
         index[user_id] = {
             "name": user.full_name,
@@ -78,9 +77,7 @@ async def track_user(update: Update):
 # ====================== 封禁检查装饰器 ======================
 def check_ban(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # 先记录用户ID (即使是被封禁的用户)
         await track_user(update)
-        
         user_id = update.effective_user.id
         if user_id in banned_users:
             await update.message.reply_text("❌ 你已被封禁，无法使用本机器人。")
@@ -118,7 +115,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_index = get_user_index()
 
     if query.data == "stats":
-        # 只显示数量，不显示具体文件
         total_packages = len(db)
         total_files = sum(len(pkg["files"]) for pkg in db.values())
         total_users = len(user_index)
@@ -130,13 +126,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "list_users":
-        # 解决管理员不知道用户ID的问题，列出所有用户ID和昵称
         if not user_index:
             await query.edit_message_text("❌ 暂无用户记录")
             return
         
         msg = "👥 所有使用过的用户列表 (ID | 昵称)\n\n"
-        # 显示前30个用户，防止消息过长
         for uid, info in list(user_index.items())[:30]:
             msg += f"ID: `{uid}` | 昵称: {info['name']}\n"
         
@@ -174,18 +168,13 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
     db = get_db()
 
     if action == "search":
-        # 彻底修复实时搜索，确保任何新入库的文件都能搜到
-        # 逻辑：实时读取最新的 DB，进行全量小写包含匹配
         keyword = text.lower()
         results = []
-        # 遍历数据库中的每一个文件包
         for code, pkg in db.items():
             match = False
-            # 先搜包名
             if keyword in pkg.get("name", "").lower():
                 match = True
             else:
-                # 再遍历文件包中的每一个文件
                 for file in pkg["files"]:
                     if keyword in file["name"].lower():
                         match = True
@@ -201,7 +190,6 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ 未找到包含该关键词的文件")
 
     elif action == "view_user_upload":
-        # 查看指定用户的所有上传
         target_id = text.strip()
         results = []
         for code, pkg in db.items():
@@ -242,7 +230,6 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
         except:
             await update.message.reply_text("❌ 格式错误，请输入纯数字ID，或 /unban 数字ID")
 
-    # 操作完成后，清理状态
     del context.user_data["admin_act"]
 
 # ====================== 用户功能 ======================
@@ -251,7 +238,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 欢迎使用永久文件存储机器人！\n\n"
         "📝 使用指南：\n"
-        "1. 直接发送图片或文件\n"
+        "1. 直接发送图片、视频、文档\n"
         "2. 发送 /confirm 确认打包\n"
         "3. 输入名称（或 /skip 跳过）\n"
         "4. 获得提取码，凭码取件"
@@ -266,6 +253,7 @@ async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_sessions[user_id] = []
 
     file_info = None
+
     if message.document:
         file_info = {
             "type": "doc",
@@ -278,8 +266,14 @@ async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "id": message.photo[-1].file_id,
             "name": f"图片_{datetime.now().strftime('%H%M%S')}.jpg"
         }
+    elif message.video:
+        file_info = {
+            "type": "video",
+            "id": message.video.file_id,
+            "name": message.video.file_name or f"视频_{datetime.now().strftime('%H%M%S')}.mp4"
+        }
     else:
-        await message.reply_text("❌ 暂不支持此类型文件，仅支持图片和文档")
+        await message.reply_text("❌ 暂不支持此类型文件，仅支持图片、视频、文档")
         return
 
     user_sessions[user_id].append(file_info)
@@ -293,13 +287,11 @@ async def confirm_package(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     db = get_db()
-    # 生成唯一提取码
     while True:
         code = str(random.randint(100000, 999999))
         if code not in db:
             break
 
-    # 准备入库数据
     pending_naming[user_id] = {
         "code": code,
         "files": user_sessions[user_id],
@@ -307,83 +299,97 @@ async def confirm_package(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "id": user_id,
             "name": update.effective_user.full_name
         },
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
-    # 清空临时会话
-    del user_sessions[user_id]
+    await update.message.reply_text("📝 请为这个文件包输入一个名称（方便记忆）：\n或发送 /skip 跳过命名")
 
-    await update.message.reply_text(f"📦 打包成功！\n🔑 你的提取码：`{code}`\n请为文件包命名（或发送 /skip 跳过）：", parse_mode="Markdown")
-
-# ====================== 统一文本处理入口 (修复了状态管理问题) ======================
 @check_ban
-async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def skip_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    if user_id not in pending_naming:
+        await update.message.reply_text("❌ 没有待命名的文件包")
+        return
+
+    pkg = pending_naming[user_id]
+    pkg["name"] = f"文件包_{pkg['code']}"
+    db = get_db()
+    db[pkg["code"]] = pkg
+    save_db(db)
+
+    del user_sessions[user_id]
+    del pending_naming[user_id]
+
+    await update.message.reply_text(
+        f"✅ 打包完成！\n\n"
+        f"📦 包名：{pkg['name']}\n"
+        f"🔑 提取码：`{pkg['code']}`\n\n"
+        f"使用方法：发送提取码给我即可取件",
+        parse_mode="Markdown"
+    )
+
+@check_ban
+async def set_package_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in pending_naming:
+        return
+
+    name = update.message.text.strip()
+    if len(name) > 50:
+        await update.message.reply_text("❌ 名称太长，请控制在50字以内")
+        return
+
+    pkg = pending_naming[user_id]
+    pkg["name"] = name
+    db = get_db()
+    db[pkg["code"]] = pkg
+    save_db(db)
+
+    del user_sessions[user_id]
+    del pending_naming[user_id]
+
+    await update.message.reply_text(
+        f"✅ 打包完成！\n\n"
+        f"📦 包名：{pkg['name']}\n"
+        f"🔑 提取码：`{pkg['code']}`\n\n"
+        f"使用方法：发送提取码给我即可取件",
+        parse_mode="Markdown"
+    )
+
+@check_ban
+async def fetch_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     db = get_db()
 
-    # 1. 优先处理命名流程 (生成文件入库的关键步骤)
-    if user_id in pending_naming:
-        pkg_data = pending_naming[user_id]
-        # 设置包名
-        pkg_data["name"] = text if text != "/skip" else "未命名"
-        # 实时写入数据库 (修复1的关键：命名后立即保存)
-        db[pkg_data["code"]] = pkg_data
-        save_db(db)
-        # 清除命名状态
-        del pending_naming[user_id]
-        # 回复用户
-        await update.message.reply_text(f"✅ 保存成功！\n📦 包名：{pkg_data['name']}\n🔑 提取码：`{pkg_data['code']}`\n妥善保管你的提取码！", parse_mode="Markdown")
-        return
-
-    # 2. 处理管理员操作，并修复状态问题
-    if "admin_act" in context.user_data and user_id == ADMIN_USER_ID:
-        # 如果用户发送“取消”，则退出当前管理员操作
-        if text.lower() in ["取消", "exit", "quit", "/cancel"]:
-            del context.user_data["admin_act"]
-            await update.message.reply_text("✅ 已取消当前管理员操作。")
-            return
-        # 否则执行管理员操作
-        await handle_admin_action(update, context)
-        return
-
-    # 3. 最后处理取件码验证
-    if text in db:
+    if len(text) == 6 and text.isdigit() and text in db:
         pkg = db[text]
-        await update.message.reply_text(f"📦 正在为你取回文件包：【{pkg.get('name', '未命名')}】", parse_mode="Markdown")
-        # 发送文件
-        for file in pkg["files"]:
+        await update.message.reply_text(f"📦 正在为你取出文件包：{pkg.get('name', '未命名')}")
+
+        for f in pkg["files"]:
             try:
-                if file["type"] == "img":
-                    await update.message.reply_photo(photo=file["id"])
-                else:
-                    await update.message.reply_document(document=file["id"], filename=file["name"])
+                if f["type"] == "img":
+                    await update.message.reply_photo(photo=f["id"], caption=f["name"])
+                elif f["type"] == "video":
+                    await update.message.reply_video(video=f["id"], caption=f["name"])
+                elif f["type"] == "doc":
+                    await update.message.reply_document(document=f["id"], filename=f["name"])
             except Exception as e:
-                await update.message.reply_text(f"⚠️ 发送文件 `{file['name']}` 时出错：{str(e)}")
+                await update.message.reply_text(f"⚠️ 文件 {f['name']} 可能已过期或被TG删除")
         return
 
-    # 如果都不是，提示用户
-    await update.message.reply_text("❌ 无效指令。若要取件，请发送正确的6位提取码。若要取消管理员操作，请发送“取消”。")
-
-# ====================== 主程序启动 ======================
+# ====================== 启动机器人 ======================
 def main():
-    if not BOT_TOKEN:
-        raise ValueError("请设置 TELEGRAM_BOT_TOKEN 环境变量")
-
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # 命令注册
+    application.add_handler(CommandHandler("admin", admin_panel))
+    application.add_handler(CallbackQueryHandler(admin_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_action))
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("confirm", confirm_package))
-    application.add_handler(CommandHandler("admin", admin_panel))
+    application.add_handler(CommandHandler("skip", skip_name))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL | filters.VIDEO, upload_file))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_package_name))
+    application.add_handler(MessageHandler(filters.TEXT, fetch_file))
 
-    # 消息注册
-    application.add_handler(MessageHandler(filters.ATTACHMENT, upload_file))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_text))
-    
-    # 回调注册
-    application.add_handler(CallbackQueryHandler(admin_callback))
-
-    # 启动
     application.run_polling()
 
 if __name__ == "__main__":
