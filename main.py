@@ -20,53 +20,43 @@ ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
 user_sessions = {}
 pending_naming = {}
 
-# ====================== 永久存储核心 (数据永不丢失) ======================
+# ====================== 永久存储核心 ======================
 def get_db():
-    """读取提取码数据库"""
     try:
         return json.loads(os.environ.get("BOT_DB", "{}"))
     except:
         return {}
 
 def save_db(db_data):
-    """保存提取码数据库"""
     os.environ["BOT_DB"] = json.dumps(db_data, ensure_ascii=False, indent=2)
 
 def get_banned():
-    """读取封禁列表"""
     try:
         return json.loads(os.environ.get("BOT_BANNED", "[]"))
     except:
         return []
 
 def save_banned(banned_list):
-    """保存封禁列表"""
     os.environ["BOT_BANNED"] = json.dumps(banned_list, ensure_ascii=False)
 
 def get_user_index():
-    """读取用户索引 (用于快速获取用户ID)"""
     try:
         return json.loads(os.environ.get("USER_INDEX", "{}"))
     except:
         return {}
 
 def save_user_index(index_data):
-    """保存用户索引"""
     os.environ["USER_INDEX"] = json.dumps(index_data, ensure_ascii=False, indent=2)
 
-# 初始化全局变量
 banned_users = get_banned()
 
-# ====================== 辅助功能：用户ID自动记录 ======================
+# ====================== 用户记录 ======================
 async def track_user(update: Update):
-    """只要用户发消息，就自动记录其ID和昵称"""
     user = update.effective_user
     if not user:
         return
-    
     user_id = str(user.id)
     index = get_user_index()
-    
     if user_id not in index or index[user_id]["name"] != user.full_name:
         index[user_id] = {
             "name": user.full_name,
@@ -74,7 +64,7 @@ async def track_user(update: Update):
         }
         save_user_index(index)
 
-# ====================== 封禁检查装饰器 ======================
+# ====================== 封禁检查 ======================
 def check_ban(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await track_user(update)
@@ -85,13 +75,12 @@ def check_ban(func):
         return await func(update, context)
     return wrapper
 
-# ====================== 管理员核心功能 ======================
+# ====================== 管理员 ======================
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID:
         await update.message.reply_text("❌ 你没有管理员权限")
         return
-
     keyboard = [
         [InlineKeyboardButton("📊 统计总数", callback_data="stats")],
         [InlineKeyboardButton("👥 查看用户列表", callback_data="list_users")],
@@ -106,14 +95,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-
     if user_id != ADMIN_USER_ID:
         await query.edit_message_text("❌ 权限不足")
         return
-
     db = get_db()
     user_index = get_user_index()
-
     if query.data == "stats":
         total_packages = len(db)
         total_files = sum(len(pkg["files"]) for pkg in db.values())
@@ -124,33 +110,25 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"文件包总数：{total_packages} 个\n"
             f"文件总数：{total_files} 个"
         )
-
     elif query.data == "list_users":
         if not user_index:
             await query.edit_message_text("❌ 暂无用户记录")
             return
-        
         msg = "👥 所有使用过的用户列表 (ID | 昵称)\n\n"
         for uid, info in list(user_index.items())[:30]:
             msg += f"ID: `{uid}` | 昵称: {info['name']}\n"
-        
         if len(user_index) > 30:
             msg += f"\n... 还有 {len(user_index) - 30} 个用户未显示"
-        
         await query.edit_message_text(msg, parse_mode="Markdown")
-
     elif query.data == "search":
         await query.edit_message_text("🔍 请发送搜索关键词（支持实时匹配包名和文件名）：")
         context.user_data["admin_act"] = "search"
-
     elif query.data == "view_user_upload":
         await query.edit_message_text("👤 请发送用户ID，查看该用户所有上传的文件包：")
         context.user_data["admin_act"] = "view_user_upload"
-
     elif query.data == "delete":
         await query.edit_message_text("🗑️ 请发送要删除的6位提取码：")
         context.user_data["admin_act"] = "delete"
-
     elif query.data == "ban":
         await query.edit_message_text("🚫 请发送用户ID，或输入 /unban [用户ID] 进行解封：")
         context.user_data["admin_act"] = "ban"
@@ -158,15 +136,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "admin_act" not in context.user_data:
         return
-
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID:
         return
-
     action = context.user_data["admin_act"]
     text = update.message.text.strip()
     db = get_db()
-
     if action == "search":
         keyword = text.lower()
         results = []
@@ -183,24 +158,20 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
                 result_line = f"🔑 提取码：`{code}`\n📦 包名：{pkg.get('name', '未命名')}\n👤 上传者ID：`{pkg['uploader']['id']}`"
                 if result_line not in results:
                     results.append(result_line)
-
         if results:
             await update.message.reply_text(f"✅ 找到 {len(results)} 个匹配结果：\n\n" + "\n\n".join(results), parse_mode="Markdown")
         else:
             await update.message.reply_text("❌ 未找到包含该关键词的文件")
-
     elif action == "view_user_upload":
         target_id = text.strip()
         results = []
         for code, pkg in db.items():
             if str(pkg["uploader"]["id"]) == target_id:
                 results.append(f"🔑 `{code}` | {pkg.get('name', '未命名')}")
-        
         if results:
             await update.message.reply_text(f"👤 用户 {target_id} 上传过：\n\n" + "\n".join(results), parse_mode="Markdown")
         else:
             await update.message.reply_text("❌ 该用户无上传记录")
-
     elif action == "delete":
         if text in db:
             del db[text]
@@ -208,7 +179,6 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text(f"✅ 提取码 `{text}` 已永久删除", parse_mode="Markdown")
         else:
             await update.message.reply_text("❌ 提取码不存在")
-
     elif action == "ban":
         try:
             if text.startswith("/unban"):
@@ -229,7 +199,6 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
                     await update.message.reply_text("❌ 该用户已被封禁")
         except:
             await update.message.reply_text("❌ 格式错误，请输入纯数字ID，或 /unban 数字ID")
-
     del context.user_data["admin_act"]
 
 # ====================== 用户功能 ======================
@@ -248,12 +217,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     message = update.message
-
     if user_id not in user_sessions:
         user_sessions[user_id] = []
-
     file_info = None
-
     if message.document:
         file_info = {
             "type": "doc",
@@ -275,7 +241,6 @@ async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await message.reply_text("❌ 暂不支持此类型文件，仅支持图片、视频、文档")
         return
-
     user_sessions[user_id].append(file_info)
     await message.reply_text(f"✅ 已接收！当前共收集 {len(user_sessions[user_id])} 个文件。\n输入 /confirm 完成打包。")
 
@@ -285,13 +250,11 @@ async def confirm_package(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in user_sessions or not user_sessions[user_id]:
         await update.message.reply_text("❌ 你还没有上传任何文件！")
         return
-
     db = get_db()
     while True:
         code = str(random.randint(100000, 999999))
         if code not in db:
             break
-
     pending_naming[user_id] = {
         "code": code,
         "files": user_sessions[user_id],
@@ -308,16 +271,13 @@ async def skip_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in pending_naming:
         await update.message.reply_text("❌ 没有待命名的文件包")
         return
-
     pkg = pending_naming[user_id]
     pkg["name"] = f"文件包_{pkg['code']}"
     db = get_db()
     db[pkg["code"]] = pkg
     save_db(db)
-
     del user_sessions[user_id]
     del pending_naming[user_id]
-
     await update.message.reply_text(
         f"✅ 打包完成！\n\n"
         f"📦 包名：{pkg['name']}\n"
@@ -331,21 +291,17 @@ async def set_package_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in pending_naming:
         return
-
     name = update.message.text.strip()
     if len(name) > 50:
         await update.message.reply_text("❌ 名称太长，请控制在50字以内")
         return
-
     pkg = pending_naming[user_id]
     pkg["name"] = name
     db = get_db()
     db[pkg["code"]] = pkg
     save_db(db)
-
     del user_sessions[user_id]
     del pending_naming[user_id]
-
     await update.message.reply_text(
         f"✅ 打包完成！\n\n"
         f"📦 包名：{pkg['name']}\n"
@@ -358,11 +314,9 @@ async def set_package_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def fetch_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     db = get_db()
-
     if len(text) == 6 and text.isdigit() and text in db:
         pkg = db[text]
         await update.message.reply_text(f"📦 正在为你取出文件包：{pkg.get('name', '未命名')}")
-
         for f in pkg["files"]:
             try:
                 if f["type"] == "img":
@@ -375,20 +329,28 @@ async def fetch_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"⚠️ 文件 {f['name']} 可能已过期或被TG删除")
         return
 
-# ====================== 启动机器人 ======================
+# ====================== 启动（修复顺序） ======================
 def main():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    application.add_handler(CommandHandler("admin", admin_panel))
-    application.add_handler(CallbackQueryHandler(admin_callback))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_action))
+    # 管理员
+    application.add_handler(CommandHandler("admin", admin_panel), 1)
+    application.add_handler(CallbackQueryHandler(admin_callback), 2)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_action), 3)
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("confirm", confirm_package))
-    application.add_handler(CommandHandler("skip", skip_name))
-    application.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL | filters.VIDEO, upload_file))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_package_name))
-    application.add_handler(MessageHandler(filters.TEXT, fetch_file))
+    # 用户命令
+    application.add_handler(CommandHandler("start", start), 10)
+    application.add_handler(CommandHandler("confirm", confirm_package), 11)
+    application.add_handler(CommandHandler("skip", skip_name), 12)
+
+    # 文件上传
+    application.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL | filters.VIDEO, upload_file), 20)
+
+    # 命名逻辑（优先级高于取码）
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, set_package_name), 30)
+
+    # 取码逻辑（最低优先级）
+    application.add_handler(MessageHandler(filters.TEXT, fetch_file), 999)
 
     application.run_polling()
 
