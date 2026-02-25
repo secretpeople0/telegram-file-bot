@@ -85,16 +85,16 @@ async def track(user_id, name, username):
 def is_banned(user_id):
     return user_id in banned
 
-# ==================== 管理员菜单 ====================
+# ==================== 管理员菜单（中文按钮 + 中文 callback_data）====================
 def admin_menu():
     return [
-        [InlineKeyboardButton("📊 统计", callback_data="stats")],
-        [InlineKeyboardButton("👥 用户列表", callback_data="users")],
-        [InlineKeyboardButton("🔍 搜文件", callback_data="search")],
-        [InlineKeyboardButton("👁️ 查用户上传", callback_data="user_uploads")],
-        [InlineKeyboardButton("🗑️ 删提取码", callback_data="del_code")],
-        [InlineKeyboardButton("🚫 封禁/解封", callback_data="ban")],
-        [InlineKeyboardButton("🔙 返回", callback_data="back")]
+        [InlineKeyboardButton("📊 统计", callback_data="统计")],
+        [InlineKeyboardButton("👥 用户列表", callback_data="用户列表")],
+        [InlineKeyboardButton("🔍 搜文件", callback_data="搜文件")],
+        [InlineKeyboardButton("👁️ 查用户上传", callback_data="查用户上传")],
+        [InlineKeyboardButton("🗑️ 删提取码", callback_data="删提取码")],
+        [InlineKeyboardButton("🚫 封禁/解封", callback_data="封禁/解封")],
+        [InlineKeyboardButton("🔙 返回", callback_data="返回")]
     ]
 
 # ==================== 命令 ====================
@@ -267,34 +267,34 @@ async def admin_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     act = q.data
     cid = q.message.chat.id
 
-    if act == "back":
+    if act == "返回":
         return await q.edit_text("👮 管理面板", reply_markup=InlineKeyboardMarkup(admin_menu()))
 
-    if act == "stats":
+    if act == "统计":
         pkg_cnt = len(bot_db)
         file_cnt= sum(len(v["files"]) for v in bot_db.values())
         usr_cnt = len(user_idx)
         await q.edit_text(f"📊 统计\n包：{pkg_cnt}\n文件：{file_cnt}\n用户：{usr_cnt}",
-                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="back")]]))
-    elif act == "users":
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
+    elif act == "用户列表":
         lines = [f"{uid}｜{d['name']}" for uid,d in list(user_idx.items())[:50]]
         await q.edit_text("\n".join(lines) or "无用户",
-                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="back")]]))
-    elif act == "search":
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
+    elif act == "搜文件":
         await q.edit_text("🔍 输入关键词",
-                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="back")]]))
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
         admin_ops[cid] = "search"
-    elif act == "user_uploads":
+    elif act == "查用户上传":
         await q.edit_text("👤 输入用户ID",
-                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="back")]]))
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
         admin_ops[cid] = "user_uploads"
-    elif act == "del_code":
+    elif act == "删提取码":
         await q.edit_text("🗑️ 输入提取码（空格分隔）",
-                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="back")]]))
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
         admin_ops[cid] = "del_code"
-    elif act == "ban":
+    elif act == "封禁/解封":
         await q.edit_text("🚫 格式：封禁 123 / 解封 123",
-                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="back")]]))
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
         admin_ops[cid] = "ban"
 
 async def backup_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
