@@ -3,6 +3,7 @@ import json
 import random
 import shutil
 import string
+import base64
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -14,13 +15,42 @@ from telegram.ext import (
     filters
 )
 
+# ====================== AES 轻量加密（不影响原有逻辑）======================
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.backends import default_backend
+
+# 固定密钥，机器人重建也能解密，不影响数据库
+SECRET_KEY = b"my_tg_bot_secure_key_32bytes__"
+salt = b"tg_bot_salt"
+
+def get_cipher():
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=100000,
+        backend=default_backend()
+    )
+    key = base64.urlsafe_b64encode(kdf.derive(SECRET_KEY))
+    return Fernet(key)
+
+def encrypt_data(data: bytes) -> str:
+    return base64.urlsafe_b64encode(get_cipher().encrypt(data)).decode("utf-8")
+
+def decrypt_data(encrypted_str: str) -> bytes:
+    try:
+        return get_cipher().decrypt(base64.urlsafe_b64decode(encrypted_str.encode("utf-8")))
+    except:
+        return None
+
 # ====================== 【新增】万能文件ID解码库 ======================
 def decode_any_file_id(file_id):
     try:
         from telegram.request import RequestData
         from telegram._utils.defaultvalue import DefaultValue
         from telegram._utils.types import FileInput
-        import base64
         import struct
 
         if file_id.startswith(('s', 'v', 'f', 'w', 'g', 'p', 'c', 'A')):
@@ -386,7 +416,6 @@ async def user_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"📦 {pkg['name']}")
         for f in pkg["files"]:
             try:
-                # 发送前再解码一次，兼容所有格式
                 real_id = decode_any_file_id(f["id"])
                 if f["type"] == "img":
                     await update.message.reply_photo(real_id)
