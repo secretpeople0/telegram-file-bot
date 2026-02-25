@@ -263,37 +263,37 @@ async def admin_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     if q.from_user.id != ADMIN_USER_ID:
-        return await q.edit_text("❌ 无权限")
+        return await q.edit_message_text("❌ 无权限")
     act = q.data
     cid = q.message.chat.id
 
     if act == "返回":
-        return await q.edit_text("👮 管理面板", reply_markup=InlineKeyboardMarkup(admin_menu()))
+        return await q.edit_message_text("👮 管理面板", reply_markup=InlineKeyboardMarkup(admin_menu()))
 
     if act == "统计":
         pkg_cnt = len(bot_db)
         file_cnt= sum(len(v["files"]) for v in bot_db.values())
         usr_cnt = len(user_idx)
-        await q.edit_text(f"📊 统计\n包：{pkg_cnt}\n文件：{file_cnt}\n用户：{usr_cnt}",
+        await q.edit_message_text(f"📊 统计\n包：{pkg_cnt}\n文件：{file_cnt}\n用户：{usr_cnt}",
                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
     elif act == "用户列表":
         lines = [f"{uid}｜{d['name']}" for uid,d in list(user_idx.items())[:50]]
-        await q.edit_text("\n".join(lines) or "无用户",
+        await q.edit_message_text("\n".join(lines) or "无用户",
                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
     elif act == "搜文件":
-        await q.edit_text("🔍 输入关键词",
+        await q.edit_message_text("🔍 输入关键词",
                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
         admin_ops[cid] = "search"
     elif act == "查用户上传":
-        await q.edit_text("👤 输入用户ID",
+        await q.edit_message_text("👤 输入用户ID",
                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
         admin_ops[cid] = "user_uploads"
     elif act == "删提取码":
-        await q.edit_text("🗑️ 输入提取码（空格分隔）",
+        await q.edit_message_text("🗑️ 输入提取码（空格分隔）",
                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
         admin_ops[cid] = "del_code"
     elif act == "封禁/解封":
-        await q.edit_text("🚫 格式：封禁 123 / 解封 123",
+        await q.edit_message_text("🚫 格式：封禁 123 / 解封 123",
                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
         admin_ops[cid] = "ban"
 
