@@ -275,26 +275,26 @@ async def admin_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         file_cnt= sum(len(v["files"]) for v in bot_db.values())
         usr_cnt = len(user_idx)
         await q.edit_text(f"📊 统计\n包：{pkg_cnt}\n文件：{file_cnt}\n用户：{usr_cnt}",
-                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data="back")]]))
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="back")]]))
     elif act == "users":
         lines = [f"{uid}｜{d['name']}" for uid,d in list(user_idx.items())[:50]]
         await q.edit_text("\n".join(lines) or "无用户",
-                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data="back")]]))
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="back")]]))
     elif act == "search":
         await q.edit_text("🔍 输入关键词",
-                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data="back")]]))
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="back")]]))
         admin_ops[cid] = "search"
     elif act == "user_uploads":
         await q.edit_text("👤 输入用户ID",
-                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data="back")]]))
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="back")]]))
         admin_ops[cid] = "user_uploads"
     elif act == "del_code":
         await q.edit_text("🗑️ 输入提取码（空格分隔）",
-                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data="back")]]))
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="back")]]))
         admin_ops[cid] = "del_code"
     elif act == "ban":
         await q.edit_text("🚫 格式：封禁 123 / 解封 123",
-                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data="back")]]))
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="back")]]))
         admin_ops[cid] = "ban"
 
 async def backup_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
