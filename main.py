@@ -15,44 +15,29 @@ from telegram.ext import (
     filters
 )
 
-# ====================== AES 轻量加密（不影响原有逻辑）======================
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.backends import default_backend
+# ====================== 轻量 XOR 加密（无第三方库，100%兼容）======================
+def xor_crypt(data: bytes, key: bytes = b"tg_bot_secure") -> bytes:
+    key = key * (len(data) // len(key) + 1)
+    return bytes([d ^ k for d, k in zip(data, key)])
 
-# 固定密钥，机器人重建也能解密，不影响数据库
-SECRET_KEY = b"my_tg_bot_secure_key_32bytes__"
-salt = b"tg_bot_salt"
-
-def get_cipher():
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=salt,
-        iterations=100000,
-        backend=default_backend()
-    )
-    key = base64.urlsafe_b64encode(kdf.derive(SECRET_KEY))
-    return Fernet(key)
-
-def encrypt_data(data: bytes) -> str:
-    return base64.urlsafe_b64encode(get_cipher().encrypt(data)).decode("utf-8")
-
-def decrypt_data(encrypted_str: str) -> bytes:
+def encode_file_id(file_id: str) -> str:
     try:
-        return get_cipher().decrypt(base64.urlsafe_b64decode(encrypted_str.encode("utf-8")))
+        encrypted = xor_crypt(file_id.encode("utf-8"))
+        return base64.urlsafe_b64encode(encrypted).decode("utf-8")
     except:
-        return None
+        return file_id
 
-# ====================== 【新增】万能文件ID解码库 ======================
+def decode_file_id(encoded_id: str) -> str:
+    try:
+        encrypted = base64.urlsafe_b64decode(encoded_id.encode("utf-8"))
+        return xor_crypt(encrypted).decode("utf-8")
+    except:
+        return encoded_id
+
+# ====================== 万能 file_id 解码 ======================
 def decode_any_file_id(file_id):
     try:
-        from telegram.request import RequestData
-        from telegram._utils.defaultvalue import DefaultValue
-        from telegram._utils.types import FileInput
         import struct
-
         if file_id.startswith(('s', 'v', 'f', 'w', 'g', 'p', 'c', 'A')):
             try:
                 decoded = base64.urlsafe_b64decode(file_id + '=' * (-len(file_id) % 4))
@@ -86,7 +71,7 @@ user_sessions = {}
 pending_naming = {}
 admin_operations = {}
 
-# ====================== 数据目录与持久化 ======================
+# ====================== 数据目录 ======================
 DATA_DIR = "/data"
 BACKUP_DIR = os.path.join(DATA_DIR, "backup")
 
@@ -98,7 +83,7 @@ def load_json(filename):
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except:
         return {} if "db" in filename or "index" in filename else []
 
 def save_json(filename, data):
@@ -124,23 +109,16 @@ def auto_backup():
         dst = os.path.join(BACKUP_DIR, f"{fname}.{ts}")
         if os.path.exists(src):
             shutil.copy(src, dst)
-    backups = sorted(
-        [os.path.join(BACKUP_DIR, f) for f in os.listdir(BACKUP_DIR)],
-        key=os.path.getmtime,
-        reverse=True
-    )
-    for old_file in backups[MAX_BACKUP_COUNT:]:
-        os.remove(old_file)
+    backups = sorted([os.path.join(BACKUP_DIR, f) for f in os.listdir(BACKUP_DIR)], key=os.path.getmtime, reverse=True)
+    for old in backups[MAX_BACKUP_COUNT:]:
+        os.remove(old)
     last_backup_time = now
 
-# ====================== 权限与用户追踪 ======================
+# ====================== 用户追踪 ======================
 async def track_user(user_id: int, full_name: str, username: str):
     uid = str(user_id)
     if uid not in user_index or user_index[uid]["name"] != full_name:
-        user_index[uid] = {
-            "name": full_name,
-            "username": username or "无"
-        }
+        user_index[uid] = {"name": full_name, "username": username or "无"}
         save_json("user_index.json", user_index)
 
 def is_banned(user_id: int) -> bool:
@@ -150,7 +128,7 @@ def is_banned(user_id: int) -> bool:
 def back_to_admin_menu():
     return [
         [InlineKeyboardButton("📊 统计总数", callback_data="stats")],
-        [InlineKeyboardButton("👥 查看用户列表", callback_data="list_users")],
+        [InlineKeyboardButton("👥 用户列表", callback_data="list_users")],
         [InlineKeyboardButton("🔍 搜索文件", callback_data="search")],
         [InlineKeyboardButton("👁️ 查看用户上传", callback_data="view_user_upload")],
         [InlineKeyboardButton("🗑️ 删除提取码", callback_data="delete_code")],
@@ -159,120 +137,92 @@ def back_to_admin_menu():
     ]
 
 async def admin_panel(update: Update, _):
-    user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID:
+    if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("❌ 无权限")
         return
-    keyboard = back_to_admin_menu()
-    await update.message.reply_text("👮 管理菜单", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("👮 管理菜单", reply_markup=InlineKeyboardMarkup(back_to_admin_menu()))
 
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    if user_id != ADMIN_USER_ID:
-        await query.edit_message_text("❌ 权限不足")
+    q = update.callback_query
+    await q.answer()
+    if q.from_user.id != ADMIN_USER_ID:
+        await q.edit_message_text("❌ 权限不足")
         return
-    action = query.data
-    chat_id = query.message.chat.id
+    action = q.data
+    cid = q.message.chat.id
 
     if action == "back_to_admin":
-        await query.edit_message_text("👮 返回管理菜单", reply_markup=InlineKeyboardMarkup(back_to_admin_menu()))
+        await q.edit_message_text("👮 返回管理菜单", reply_markup=InlineKeyboardMarkup(back_to_admin_menu()))
         return
 
     if action == "stats":
-        total_pkgs = len(bot_db)
-        total_files = sum(len(p["files"]) for p in bot_db.values())
-        total_users = len(user_index)
-        await query.edit_message_text(
-            f"📊 统计\n总用户：{total_users}\n文件包：{total_pkgs}\n文件数：{total_files}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_to_admin")]])
-        )
-
+        tp = len(bot_db)
+        tf = sum(len(p["files"]) for p in bot_db.values())
+        tu = len(user_index)
+        await q.edit_message_text(f"📊 统计\n总用户：{tu}\n文件包：{tp}\n文件数：{tf}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_to_admin")]]))
     elif action == "list_users":
         if not user_index:
-            await query.edit_message_text("❌ 无用户", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_to_admin")]]))
+            await q.edit_message_text("❌ 无用户", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_to_admin")]]))
             return
         msg = "👥 用户列表\n"
-        count = 0
+        cnt = 0
         for uid, info in user_index.items():
-            if count >= 50: break
+            if cnt >= 50: break
             msg += f"ID: {uid} | {info['name']}\n"
-            count += 1
-        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_to_admin")]]))
-
+            cnt +=1
+        await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_to_admin")]]))
     elif action == "search":
-        await query.edit_message_text("🔍 发关键词搜索", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_to_admin")]]))
-        admin_operations[chat_id] = "search"
-
+        await q.edit_message_text("🔍 发关键词搜索", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_to_admin")]]))
+        admin_operations[cid] = "search"
     elif action == "view_user_upload":
-        await query.edit_message_text("👤 发用户ID查询", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_to_admin")]]))
-        admin_operations[chat_id] = "view_user_upload"
-
+        await q.edit_message_text("👤 发用户ID查询", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_to_admin")]]))
+        admin_operations[cid] = "view_user_upload"
     elif action == "delete_code":
-        await query.edit_message_text("🗑️ 发送提取码（可多个，空格分隔）", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_to_admin")]]))
-        admin_operations[chat_id] = "delete_code"
-
+        await q.edit_message_text("🗑️ 发送提取码", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_to_admin")]]))
+        admin_operations[cid] = "delete_code"
     elif action == "ban_user":
-        await query.edit_message_text("🚫 格式：封禁 123 / 解封 123", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_to_admin")]]))
-        admin_operations[chat_id] = "ban_user"
+        await q.edit_message_text("🚫 封禁 123 / 解封 123", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_to_admin")]]))
+        admin_operations[cid] = "ban_user"
 
 async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    text = update.message.text.strip()
-    if user_id != ADMIN_USER_ID or chat_id not in admin_operations:
+    uid = update.effective_user.id
+    cid = update.effective_chat.id
+    txt = update.message.text.strip()
+    if uid != ADMIN_USER_ID or cid not in admin_operations:
         return
-    action = admin_operations.pop(chat_id)
-
-    if action == "delete_code":
-        codes = text.split()
-        deleted = []
-        not_found = []
-        for c in codes:
-            if c in bot_db:
-                del bot_db[c]
-                deleted.append(c)
+    act = admin_operations.pop(cid)
+    if act == "delete_code":
+        dels = []
+        nf = []
+        for code in txt.split():
+            if code in bot_db:
+                del bot_db[code]
+                dels.append(code)
             else:
-                not_found.append(c)
+                nf.append(code)
         save_json("bot_db.json", bot_db)
-        msg = ""
-        if deleted:
-            msg += f"✅ 已删除：{' '.join(deleted)}\n"
-        if not_found:
-            msg += f"❌ 不存在：{' '.join(not_found)}"
-        await update.message.reply_text(msg)
-        return
-
-    if action == "search":
-        res = []
-        for code, pkg in bot_db.items():
-            if text.lower() in pkg["name"].lower():
-                res.append(f"{code}｜{pkg['name']}")
+        await update.message.reply_text(f"✅ 删：{' '.join(dels)}\n❌ 无：{' '.join(nf)}" if dels or nf else "❌ 无操作")
+    elif act == "search":
+        res = [f"{c}｜{p['name']}" for c,p in bot_db.items() if txt.lower() in p['name'].lower()]
         await update.message.reply_text("\n".join(res) if res else "❌ 无结果")
-
-    elif action == "view_user_upload":
-        uid = text.strip()
-        up = []
-        for code, pkg in bot_db.items():
-            if str(pkg["uploader"]["id"]) == uid:
-                up.append(f"{code}｜{pkg['name']}")
-        await update.message.reply_text("\n".join(up) if up else "❌ 无记录")
-
-    elif action == "ban_user":
-        parts = text.split()
-        if len(parts) != 2:
-            await update.message.reply_text("❌ 格式错误")
+    elif act == "view_user_upload":
+        tuid = txt.strip()
+        res = [f"{c}｜{p['name']}" for c,p in bot_db.items() if str(p['uploader']['id']) == tuid]
+        await update.message.reply_text("\n".join(res) if res else "❌ 无记录")
+    elif act == "ban_user":
+        p = txt.split()
+        if len(p)!=2:
+            await update.message.reply_text("❌ 格式：封禁 123")
             return
-        cmd, tid = parts
+        cmd,tid = p
         try:
-            tid = int(tid)
-            if cmd == "封禁":
+            tid=int(tid)
+            if cmd=="封禁":
                 if tid not in banned_users:
                     banned_users.append(tid)
                     save_json("banned.json", banned_users)
                 await update.message.reply_text(f"✅ 封禁 {tid}")
-            elif cmd == "解封":
+            elif cmd=="解封":
                 if tid in banned_users:
                     banned_users.remove(tid)
                     save_json("banned.json", banned_users)
@@ -281,142 +231,118 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text("❌ ID错误")
 
 async def my_codes(update: Update, _):
-    user_id = update.effective_user.id
-    if is_banned(user_id):
+    uid = update.effective_user.id
+    if is_banned(uid):
         await update.message.reply_text("❌ 已封禁")
         return
-    my_list = []
-    for code, pkg in bot_db.items():
-        if str(pkg["uploader"]["id"]) == str(user_id):
-            my_list.append(f"🔑 {code}｜{pkg['name']}")
-    if not my_list:
-        await update.message.reply_text("📭 暂无提取码")
-        return
-    await update.message.reply_text("\n".join(my_list))
+    lst = [f"🔑 {c}｜{p['name']}" for c,p in bot_db.items() if str(p['uploader']['id'])==str(uid)]
+    await update.message.reply_text("\n".join(lst) if lst else "📭 暂无提取码")
 
 async def del_my_code(update: Update, _):
-    user_id = update.effective_user.id
+    uid = update.effective_user.id
     args = update.message.text.split()
-    if len(args) < 2:
-        await update.message.reply_text("📌 使用：/del 提取码")
+    if len(args)<2:
+        await update.message.reply_text("📌 /del 提取码")
         return
     code = args[1]
     if code not in bot_db:
-        await update.message.reply_text("❌ 提取码不存在")
+        await update.message.reply_text("❌ 不存在")
         return
-    if str(bot_db[code]["uploader"]["id"]) != str(user_id):
-        await update.message.reply_text("❌ 无权删除他人提取码")
+    if str(bot_db[code]['uploader']['id'])!=str(uid):
+        await update.message.reply_text("❌ 无权删除")
         return
     del bot_db[code]
     save_json("bot_db.json", bot_db)
-    await update.message.reply_text(f"✅ {code} 已删除并失效")
+    await update.message.reply_text(f"✅ {code} 已删除")
 
 async def start(update: Update, _):
-    await update.message.reply_text(
-        "👋 文件存储机器人\n"
-        "📌 /my 查看我的提取码\n"
-        "🗑️ /del 提取码 删除"
-    )
+    await update.message.reply_text("👋 文件存储机器人\n📌 /my 我的\n🗑️ /del 提取码")
 
-# ====================== 【关键修改】上传时自动解码所有格式ID ======================
+# ====================== 上传：编码存储 ======================
 async def upload_file(update: Update, _):
-    user = update.effective_user
-    if is_banned(user.id):
+    u = update.effective_user
+    if is_banned(u.id):
         await update.message.reply_text("❌ 已封禁")
         return
     msg = update.message
-    file_data = None
-
+    fd = None
     if msg.photo:
-        raw_id = msg.photo[-1].file_id
-        safe_id = decode_any_file_id(raw_id)
-        file_data = {"type":"img","id":safe_id,"name":f"图片_{datetime.now().strftime('%H%M%S')}.jpg"}
-
+        raw = msg.photo[-1].file_id
+        enc = encode_file_id(decode_any_file_id(raw))
+        fd = {"type":"img","id":enc,"name":f"图片_{datetime.now().strftime('%H%M%S')}.jpg"}
     elif msg.video:
-        raw_id = msg.video.file_id
-        safe_id = decode_any_file_id(raw_id)
-        file_data = {"type":"video","id":safe_id,"name":msg.video.file_name or f"视频_{datetime.now().strftime('%H%M%S')}.mp4"}
-
+        raw = msg.video.file_id
+        enc = encode_file_id(decode_any_file_id(raw))
+        fd = {"type":"video","id":enc,"name":msg.video.file_name or f"视频_{datetime.now().strftime('%H%M%S')}.mp4"}
     elif msg.document:
-        raw_id = msg.document.file_id
-        safe_id = decode_any_file_id(raw_id)
-        file_data = {"type":"doc","id":safe_id,"name":msg.document.file_name or "文件"}
-
+        raw = msg.document.file_id
+        enc = encode_file_id(decode_any_file_id(raw))
+        fd = {"type":"doc","id":enc,"name":msg.document.file_name or "文件"}
     else:
         await msg.reply_text("❌ 仅支持图片/视频/文档")
         return
-
-    if user.id not in user_sessions:
-        user_sessions[user.id] = []
-    user_sessions[user.id].append(file_data)
-    await msg.reply_text(f"✅ 已收 {len(user_sessions[user.id])} 个\n发送 /confirm 打包")
-    await track_user(user.id, user.full_name, user.username)
+    if u.id not in user_sessions:
+        user_sessions[u.id] = []
+    user_sessions[u.id].append(fd)
+    await msg.reply_text(f"✅ 已收 {len(user_sessions[u.id])} 个\n/confirm 打包")
+    await track_user(u.id, u.full_name, u.username)
 
 async def confirm_package(update: Update, _):
-    user = update.effective_user
-    if user.id not in user_sessions or not user_sessions[user.id]:
+    u = update.effective_user
+    if u.id not in user_sessions or not user_sessions[u.id]:
         await update.message.reply_text("❌ 无文件")
         return
-
     chars = string.ascii_letters + string.digits
     while True:
         code = ''.join(random.choice(chars) for _ in range(6))
         if code not in bot_db:
             break
-
-    pending_naming[user.id] = {
-        "code":code,
-        "files":user_sessions[user.id],
-        "uploader":{"id":user.id,"name":user.full_name}
-    }
-    del user_sessions[user.id]
+    pending_naming[u.id] = {"code":code,"files":user_sessions[u.id],"uploader":{"id":u.id,"name":u.full_name}}
+    del user_sessions[u.id]
     await update.message.reply_text("📦 输入包名 /skip 跳过")
 
 async def skip_naming(update: Update, _):
-    user = update.effective_user
-    if user.id not in pending_naming:
+    u = update.effective_user
+    if u.id not in pending_naming:
         await update.message.reply_text("❌ 无待命名")
         return
-    pkg = pending_naming[user.id]
+    pkg = pending_naming[u.id]
     pkg["name"] = f"文件包_{pkg['code']}"
     bot_db[pkg["code"]] = pkg
     save_json("bot_db.json", bot_db)
     auto_backup()
-    del pending_naming[user.id]
+    del pending_naming[u.id]
     await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
 
 async def user_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    chat_id = update.effective_chat.id
-    text = update.message.text.strip()
-
-    if user.id == ADMIN_USER_ID and chat_id in admin_operations:
+    u = update.effective_user
+    cid = update.effective_chat.id
+    txt = update.message.text.strip()
+    if u.id == ADMIN_USER_ID and cid in admin_operations:
         await handle_admin_input(update, context)
         return
-
-    if is_banned(user.id):
+    if is_banned(u.id):
         await update.message.reply_text("❌ 已封禁")
         return
-
-    if user.id in pending_naming:
-        pkg = pending_naming[user.id]
-        pkg["name"] = text[:50]
+    if u.id in pending_naming:
+        pkg = pending_naming[u.id]
+        pkg["name"] = txt[:50]
         bot_db[pkg["code"]] = pkg
         save_json("bot_db.json", bot_db)
         auto_backup()
-        del pending_naming[user.id]
+        del pending_naming[u.id]
         await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
         return
-
-    if len(text) == 6:
-        if text not in bot_db:
+    if len(txt) == 6:
+        if txt not in bot_db:
             await update.message.reply_text("❌ 不存在")
             return
-        pkg = bot_db[text]
+        pkg = bot_db[txt]
         await update.message.reply_text(f"📦 {pkg['name']}")
         for f in pkg["files"]:
             try:
-                real_id = decode_any_file_id(f["id"])
+                real_id = decode_file_id(f["id"])
+                real_id = decode_any_file_id(real_id)
                 if f["type"] == "img":
                     await update.message.reply_photo(real_id)
                 elif f["type"] == "video":
