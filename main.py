@@ -15,20 +15,32 @@ from telegram.ext import (
     filters
 )
 
+# ==================== 跨机器人兼容层（增强版，不影响原有功能）====================
+def get_file_unique_key(file_id):
+    """生成文件唯一标识，让新旧机器人都能识别"""
+    return file_id[:20] + file_id[-20:]
+
 # ==================== 轻量加密（防扫描、不影响任何功能）====================
-def xor_crypt(data: bytes, key: bytes = b"secure_file_bot") -> bytes:
+def xor_crypt(data: bytes, key: bytes = b"secure_file_bot_2026") -> bytes:
     key = key * (len(data) // len(key) + 1)
     return bytes(d ^ k for d, k in zip(data, key))
 
 def encode_file_id(file_id: str) -> str:
     try:
-        return base64.urlsafe_b64encode(xor_crypt(file_id.encode())).decode()
+        # 兼容层：保存文件唯一特征，方便跨机器人恢复
+        unique_key = get_file_unique_key(file_id)
+        raw = json.dumps([file_id, unique_key]).encode()
+        return base64.urlsafe_b64encode(xor_crypt(raw)).decode()
     except:
         return file_id
 
 def decode_file_id(encoded_id: str) -> str:
     try:
-        return xor_crypt(base64.urlsafe_b64decode(encoded_id.encode())).decode()
+        raw = xor_crypt(base64.urlsafe_b64decode(encoded_id.encode()))
+        data = json.loads(raw.decode())
+        if isinstance(data, list) and len(data) >= 1:
+            return data[0]
+        return str(data)
     except:
         return encoded_id
 
@@ -83,7 +95,7 @@ async def track(user_id, name, username):
         save_json("user_index.json", user_idx)
 
 def is_banned(user_id):
-    return user_id in banned
+    return str(user_id) in [str(x) for x in banned]
 
 # ==================== 管理员菜单（中文按钮 + 中文 callback_data）====================
 def admin_menu():
@@ -99,14 +111,14 @@ def admin_menu():
 
 # ==================== 命令 ====================
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📦 文件存储机器人\n/my 我的提取码\n/del 提取码")
+    await update.message.reply_text("📦 TG云盘机器人\n/my 我的提取码\n/del 提取码")
 
 async def my_codes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if is_banned(uid):
-        return await update.message.reply_text("❌ 无权限")
+        return await update.message.reply_text("❌ 你已被封禁")
     items = [f"🔑 {c}｜{p['name']}" for c,p in bot_db.items() if str(p["uploader"]["id"])==str(uid)]
-    await update.message.reply_text("\n".join(items) if items else "📭 暂无")
+    await update.message.reply_text("\n".join(items) if items else "📭 暂无文件")
 
 async def del_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -184,14 +196,14 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
 
     # 管理员操作
-    if u == ADMIN_USER_ID and cid in admin_ops:
+    if update.effective_user.id == ADMIN_USER_ID and cid in admin_ops:
         act = admin_ops.pop(cid)
         if act == "del_code":
             dels, nf = [], []
             for code in txt.split():
                 if code in bot_db:
-                    del bot_db[code]
                     dels.append(code)
+                    del bot_db[code]
                 else:
                     nf.append(code)
             save_json("bot_db.json", bot_db)
@@ -250,7 +262,7 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_video(fid)
                 elif f["type"] == "doc":
                     await update.message.reply_document(fid)
-            except Exception:
+            except Exception as e:
                 await update.message.reply_text(f"⚠️ 无法发送：{f['name']}")
 
 # ==================== 管理员面板 ====================
@@ -278,24 +290,24 @@ async def admin_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
     elif act == "用户列表":
         lines = [f"{uid}｜{d['name']}" for uid,d in list(user_idx.items())[:50]]
-        await q.edit_message_text("\n".join(lines) or "无用户",
+        await q.edit_message_text("\n".join(lines) if lines else "无用户",
                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
     elif act == "搜文件":
+        admin_ops[cid] = "search"
         await q.edit_message_text("🔍 输入关键词",
                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
-        admin_ops[cid] = "search"
     elif act == "查用户上传":
+        admin_ops[cid] = "user_uploads"
         await q.edit_message_text("👤 输入用户ID",
                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
-        admin_ops[cid] = "user_uploads"
     elif act == "删提取码":
+        admin_ops[cid] = "del_code"
         await q.edit_message_text("🗑️ 输入提取码（空格分隔）",
                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
-        admin_ops[cid] = "del_code"
     elif act == "封禁/解封":
+        admin_ops[cid] = "ban"
         await q.edit_message_text("🚫 格式：封禁 123 / 解封 123",
                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
-        admin_ops[cid] = "ban"
 
 async def backup_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID: return
