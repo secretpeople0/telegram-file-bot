@@ -59,7 +59,10 @@ def load_json(name):
     p = os.path.join(DATA_DIR, name)
     try:
         with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            if name in ["bot_db", "user_index", "banned"] and not isinstance(data, dict):
+                return {}
+            return data
     except:
         return {} if name in ["bot_db", "user_index", "banned"] else []
 
@@ -68,9 +71,18 @@ def save_json(name, data):
     with open(p, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+# 强制确保数据类型正确
 bot_db = load_json("bot_db.json")
+if not isinstance(bot_db, dict):
+    bot_db = {}
+
 user_idx = load_json("user_index.json")
+if not isinstance(user_idx, dict):
+    user_idx = {}
+
 banned = load_json("banned.json")
+if not isinstance(banned, list):
+    banned = []
 
 # ==================== 工具 ====================
 def is_admin(user_id):
@@ -246,6 +258,8 @@ async def skip(update: Update, ctx: ContextTypes):
         return
     pkg = pending_naming[u]
     pkg["name"] = f"文件包_{pkg['code']}"
+    if not isinstance(bot_db, dict):
+        bot_db = {}
     bot_db[pkg["code"]] = pkg
     save_json("bot_db.json", bot_db)
     auto_backup()
@@ -269,6 +283,8 @@ async def text_handle(update: Update, ctx: ContextTypes):
     if u in pending_naming:
         pkg = pending_naming[u]
         pkg["name"] = txt[:50]
+        if not isinstance(bot_db, dict):
+            bot_db = {}
         bot_db[pkg["code"]] = pkg
         save_json("bot_db.json", bot_db)
         auto_backup()
