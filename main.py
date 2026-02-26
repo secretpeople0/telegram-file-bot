@@ -17,11 +17,12 @@ from telegram.ext import (
     filters
 )
 
-# ==================== 防炸配置（自动过期 + 持久化）====================
-RATE_LIMIT_MINUTE = 10      # 每分钟最多请求次数
-USER_COOLDOWN = 2           # 普通用户冷却秒数
+# ==================== 【取消所有频次限制】====================
+# 所有用户（包括普通用户）不再受任何请求频率限制
+RATE_LIMIT_MINUTE = float('inf')  # 无限次
+USER_COOLDOWN = 0                 # 无冷却
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
-RATE_LIMIT_FILE = "/data/rate_limit.json"  # 限流记录存在Volume里
+RATE_LIMIT_FILE = "/data/rate_limit.json"
 
 # 从文件加载限流记录
 def load_rate_limit():
@@ -41,35 +42,14 @@ def save_rate_limit(data):
 def is_admin(user_id):
     return user_id == ADMIN_USER_ID
 
+# 【核心修改】直接返回 True，取消所有限制
 def check_rate_limit(user_id):
-    if is_admin(user_id):
-        return True
-    now = time.time()
-    data = load_rate_limit()
-    user_id_str = str(user_id)
-    if user_id_str not in data:
-        data[user_id_str] = []
-    # 每次检查都清理1分钟前的旧记录，确保自动过期
-    data[user_id_str] = [t for t in data[user_id_str] if now - t < 60]
-    if len(data[user_id_str]) >= RATE_LIMIT_MINUTE:
-        save_rate_limit(data)
-        return False
-    data[user_id_str].append(now)
-    save_rate_limit(data)
     return True
 
 def check_cooldown(user_id):
-    if is_admin(user_id):
-        return True
-    now = time.time()
-    data = load_rate_limit()
-    user_id_str = str(user_id)
-    if user_id_str not in data or len(data[user_id_str]) == 0:
-        return True
-    last = data[user_id_str][-1]
-    return now - last >= USER_COOLDOWN
+    return True
 
-# 重置单个用户的限流状态
+# 重置单个用户的限流状态（现在主要用于清理旧记录）
 def reset_user_limit(user_id):
     data = load_rate_limit()
     user_id_str = str(user_id)
@@ -77,7 +57,7 @@ def reset_user_limit(user_id):
         del data[user_id_str]
         save_rate_limit(data)
 
-# 清空所有限流记录（管理员用）
+# 清空所有限流记录（管理员用，一键恢复所有人）
 def reset_all_limit():
     save_rate_limit({})
 
@@ -217,7 +197,7 @@ async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if is_banned(u.id) or is_bot_self(u.id):
         return
 
-    # 防炸限流（自动过期）
+    # 现在永远不会触发限流
     if not check_rate_limit(u.id) or not check_cooldown(u.id):
         return await update.message.reply_text("⚠️ 请求过快，请稍后再试")
 
@@ -339,7 +319,7 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if is_bot_self(u):
         return
 
-    # 全局防炸（自动过期）
+    # 全局防炸（现在永远通过）
     if not is_admin(u) and (not check_rate_limit(u) or not check_cooldown(u)):
         return
 
@@ -393,7 +373,7 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         del pending_naming[u]
         return await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
 
-    # 提取码：自动解密（防重复刷屏 + 超时熔断，自动过期）
+    # 提取码：自动解密（现在永远通过）
     if len(txt) == 6:
         if not is_admin(u) and (not check_rate_limit(u) or not check_cooldown(u)):
             return await update.message.reply_text("⚠️ 请求频繁，请稍后再试")
