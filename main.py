@@ -174,8 +174,8 @@ async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     temp_path = None
     try:
         # 1. 下载原始文件
-        f = await ctx.bot.get_file(file_obj.file_id)
-        file_bytes = await f.download_as_bytearray()
+        f = await ctx.bot.get_file(file_obj.file_id, read_timeout=30)
+        file_bytes = await f.download_as_bytearray(read_timeout=30)
 
         # 2. 端到端加密
         encrypted = xor_data(file_bytes, E2EE_KEY)
@@ -189,7 +189,8 @@ async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         sent_msg = await msg.reply_document(
             document=open(temp_path, "rb"),
             filename=f"{file_name}.enc",
-            disable_notification=True
+            disable_notification=True,
+            read_timeout=30
         )
 
         # 5. 清理临时文件
@@ -308,7 +309,7 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         del pending_naming[u]
         return await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
 
-    # 提取码：自动解密（兼容新文件）
+    # 提取码：自动解密（兼容新文件，增加超时）
     if len(txt) == 6:
         if txt not in bot_db:
             return await update.message.reply_text("❌ 不存在")
@@ -318,8 +319,9 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             temp_path = None
             try:
                 fid = decode_file_id(f["id"])
-                file = await ctx.bot.get_file(fid)
-                data = await file.download_as_bytearray()
+                # 增加超时时间
+                file = await ctx.bot.get_file(fid, read_timeout=30, write_timeout=30, connect_timeout=30, pool_timeout=30)
+                data = await file.download_as_bytearray(connect_timeout=30, read_timeout=30)
                 decrypted = xor_data(data, E2EE_KEY)
 
                 # 解密后写入临时文件再发送
@@ -328,11 +330,11 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     temp_path = temp_f.name
 
                 if f.get("orig_type") == "photo":
-                    await update.message.reply_photo(open(temp_path, "rb"), filename=f["name"])
+                    await update.message.reply_photo(open(temp_path, "rb"), filename=f["name"], read_timeout=30)
                 elif f.get("orig_type") == "video":
-                    await update.message.reply_video(open(temp_path, "rb"), filename=f["name"])
+                    await update.message.reply_video(open(temp_path, "rb"), filename=f["name"], read_timeout=30)
                 else:
-                    await update.message.reply_document(open(temp_path, "rb"), filename=f["name"])
+                    await update.message.reply_document(open(temp_path, "rb"), filename=f["name"], read_timeout=30)
 
                 os.unlink(temp_path)
                 temp_path = None
