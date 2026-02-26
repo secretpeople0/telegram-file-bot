@@ -266,9 +266,9 @@ async def skip(update: Update, ctx: ContextTypes):
     del pending_naming[u]
     await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
 
-# ==================== 按钮回调：通过短 ID 找到 token ====================
+# ==================== 按钮回调：一键取全部 ====================
 async def button_callback(update: Update, ctx: ContextTypes):
-    global id_to_token
+    global id_to_token, bot_db
     query = update.callback_query
     await query.answer()
 
@@ -296,11 +296,39 @@ async def button_callback(update: Update, ctx: ContextTypes):
         except Exception as e:
             await query.edit_message_text(f"❌ 失败：{str(e)[:60]}")
 
-# ==================== text_handle（用短 ID 映射，解决按钮数据超长） ====================
+    elif query.data.startswith("all_"):
+        code = query.data.replace("all_", "")
+        if code not in bot_db:
+            await query.edit_message_text("❌ 提取码不存在")
+            return
+        pkg = bot_db[code]
+        await query.edit_message_text(f"📦 正在发送「{pkg['name']}」的所有文件...")
+        for f in pkg.get("files", []):
+            if not isinstance(f, dict):
+                continue
+            token = f.get("data", "")
+            data = decrypt_metadata(token)
+            if not data:
+                continue
+            try:
+                await ctx.bot.forward_message(
+                    chat_id=query.from_user.id,
+                    from_chat_id=data["chat_id"],
+                    message_id=data["message_id"]
+                )
+            except Exception as e:
+                await ctx.bot.send_message(
+                    chat_id=query.from_user.id,
+                    text=f"❌ {f.get('name', '文件')} 发送失败：{str(e)[:60]}"
+                )
+        await ctx.bot.send_message(
+            chat_id=query.from_user.id,
+            text=f"✅ 「{pkg['name']}」的所有文件已发送完毕"
+        )
+
+# ==================== text_handle（增加一键取全部） ====================
 async def text_handle(update: Update, ctx: ContextTypes):
-    global bot_db
-    global BOT_SELF_ID
-    global id_to_token
+    global bot_db, BOT_SELF_ID, id_to_token
     if BOT_SELF_ID is None:
         me = await ctx.bot.get_me()
         BOT_SELF_ID = me.id
@@ -328,16 +356,19 @@ async def text_handle(update: Update, ctx: ContextTypes):
         pkg = bot_db[txt]
         await update.message.reply_text(f"📦 {pkg['name']}")
 
+        # 先出「一键取全部」按钮
+        keyboard_all = [[InlineKeyboardButton(f"📥 一键取全部「{pkg['name']}」", callback_data=f"all_{pkg['code']}")]]
+        reply_markup_all = InlineKeyboardMarkup(keyboard_all)
+        await update.message.reply_text(f"📦 一键获取全部文件", reply_markup=reply_markup_all)
+
+        # 再出单个文件按钮
         for f in pkg.get("files", []):
             if not isinstance(f, dict):
                 continue
             token = f.get("data", "")
             fname = f.get("name", "文件")
-
-            # 生成 8 位短 ID，映射到 token，确保按钮数据不超长
             short_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
             id_to_token[short_id] = token
-
             keyboard = [[InlineKeyboardButton(f"📥 取「{fname}」", callback_data=f"get_{short_id}")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text(f"📄 {fname}", reply_markup=reply_markup)
