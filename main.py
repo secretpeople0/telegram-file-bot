@@ -17,49 +17,69 @@ from telegram.ext import (
     filters
 )
 
-# ==================== 放宽后的防炸配置（更宽松，减少误拦截）====================
-RATE_LIMIT_MINUTE = 10      # 每分钟最多请求次数（从5次放宽到10次）
-USER_COOLDOWN = 2           # 普通用户冷却秒数（从5秒缩短到2秒）
+# ==================== 防炸配置（自动过期 + 持久化）====================
+RATE_LIMIT_MINUTE = 10      # 每分钟最多请求次数
+USER_COOLDOWN = 2           # 普通用户冷却秒数
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
+RATE_LIMIT_FILE = "/data/rate_limit.json"  # 限流记录存在Volume里
 
-# 全局限流记录（内存中，重启清空，确保自动过期）
-user_request_times = {}
+# 从文件加载限流记录
+def load_rate_limit():
+    if os.path.exists(RATE_LIMIT_FILE):
+        try:
+            with open(RATE_LIMIT_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+# 保存限流记录到文件
+def save_rate_limit(data):
+    with open(RATE_LIMIT_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 def is_admin(user_id):
     return user_id == ADMIN_USER_ID
 
 def check_rate_limit(user_id):
-    # 管理员不限流
     if is_admin(user_id):
         return True
     now = time.time()
+    data = load_rate_limit()
     user_id_str = str(user_id)
-    if user_id_str not in user_request_times:
-        user_request_times[user_id_str] = []
-    # 严格清理1分钟前的所有旧记录，确保自动解除
-    user_request_times[user_id_str] = [t for t in user_request_times[user_id_str] if now - t < 60]
-    # 如果当前记录数 >= 限制，返回False
-    if len(user_request_times[user_id_str]) >= RATE_LIMIT_MINUTE:
+    if user_id_str not in data:
+        data[user_id_str] = []
+    # 每次检查都清理1分钟前的旧记录，确保自动过期
+    data[user_id_str] = [t for t in data[user_id_str] if now - t < 60]
+    if len(data[user_id_str]) >= RATE_LIMIT_MINUTE:
+        save_rate_limit(data)
         return False
-    # 否则记录本次请求时间
-    user_request_times[user_id_str].append(now)
+    data[user_id_str].append(now)
+    save_rate_limit(data)
     return True
 
 def check_cooldown(user_id):
     if is_admin(user_id):
         return True
     now = time.time()
+    data = load_rate_limit()
     user_id_str = str(user_id)
-    if user_id_str not in user_request_times or len(user_request_times[user_id_str]) == 0:
+    if user_id_str not in data or len(data[user_id_str]) == 0:
         return True
-    last = user_request_times[user_id_str][-1]
+    last = data[user_id_str][-1]
     return now - last >= USER_COOLDOWN
 
-# 新增：手动重置用户限流状态（管理员可用）
+# 重置单个用户的限流状态
 def reset_user_limit(user_id):
+    data = load_rate_limit()
     user_id_str = str(user_id)
-    if user_id_str in user_request_times:
-        del user_request_times[user_id_str]
+    if user_id_str in data:
+        del data[user_id_str]
+        save_rate_limit(data)
+
+# 清空所有限流记录（管理员用）
+def reset_all_limit():
+    save_rate_limit({})
 
 # ==================== 真正端到端加密（E2EE）TG 无法检测内容 ====================
 E2EE_KEY = b"e2ee_secure_bot_2026"
@@ -147,7 +167,7 @@ def is_bot_self(user_id):
     """判断是否是机器人自身发送的消息，防止循环处理"""
     return user_id == BOT_SELF_ID
 
-# ==================== 管理员菜单 ====================
+# ==================== 管理员菜单（增加清空所有限流）====================
 def admin_menu():
     return [
         [InlineKeyboardButton("📊 统计", callback_data="统计")],
@@ -156,7 +176,8 @@ def admin_menu():
         [InlineKeyboardButton("👁️ 查用户上传", callback_data="查用户上传")],
         [InlineKeyboardButton("🗑️ 删提取码", callback_data="删提取码")],
         [InlineKeyboardButton("🚫 封禁/解封", callback_data="封禁/解封")],
-        [InlineKeyboardButton("🔄 重置限流", callback_data="重置限流")],
+        [InlineKeyboardButton("🔄 重置我的限流", callback_data="重置我的限流")],
+        [InlineKeyboardButton("🗑️ 清空所有限流", callback_data="清空所有限流")],
         [InlineKeyboardButton("🔙 返回", callback_data="返回")]
     ]
 
@@ -196,7 +217,7 @@ async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if is_banned(u.id) or is_bot_self(u.id):
         return
 
-    # 防炸限流（使用放宽后的规则）
+    # 防炸限流（自动过期）
     if not check_rate_limit(u.id) or not check_cooldown(u.id):
         return await update.message.reply_text("⚠️ 请求过快，请稍后再试")
 
@@ -318,7 +339,7 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if is_bot_self(u):
         return
 
-    # 全局防炸（使用放宽后的规则）
+    # 全局防炸（自动过期）
     if not is_admin(u) and (not check_rate_limit(u) or not check_cooldown(u)):
         return
 
@@ -372,7 +393,7 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         del pending_naming[u]
         return await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
 
-    # 提取码：自动解密（防重复刷屏 + 超时熔断，使用放宽后的规则）
+    # 提取码：自动解密（防重复刷屏 + 超时熔断，自动过期）
     if len(txt) == 6:
         if not is_admin(u) and (not check_rate_limit(u) or not check_cooldown(u)):
             return await update.message.reply_text("⚠️ 请求频繁，请稍后再试")
@@ -455,9 +476,12 @@ async def admin_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         admin_ops[cid] = "ban"
         await q.edit_message_text("🚫 格式：封禁 123 / 解封 123",
                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
-    elif act == "重置限流":
+    elif act == "重置我的限流":
         reset_user_limit(q.from_user.id)
         await q.edit_message_text("👮 管理面板\n✅ 已重置你的限流状态", reply_markup=InlineKeyboardMarkup(admin_menu()))
+    elif act == "清空所有限流":
+        reset_all_limit()
+        await q.edit_message_text("👮 管理面板\n✅ 已清空所有用户限流记录", reply_markup=InlineKeyboardMarkup(admin_menu()))
 
 async def backup_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID: return
