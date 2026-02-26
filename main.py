@@ -4,7 +4,7 @@ import random
 import shutil
 import string
 import base64
-import asyncio
+import tempfile
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -18,6 +18,7 @@ from telegram.ext import (
 
 # ==================== 真正端到端加密（E2EE）TG 无法检测内容 ====================
 E2EE_KEY = b"e2ee_secure_bot_2026"
+BOT_SELF_ID = None  # 机器人自身ID，启动时自动获取，用于防循环
 
 def xor_data(data: bytes, key: bytes) -> bytes:
     key = key * (len(data) // len(key) + 1)
@@ -98,6 +99,10 @@ async def track(user_id, name, username):
 def is_banned(user_id):
     return str(user_id) in [str(x) for x in banned]
 
+def is_bot_self(user_id):
+    """判断是否是机器人自身发送的消息，防止循环处理"""
+    return user_id == BOT_SELF_ID
+
 # ==================== 管理员菜单 ====================
 def admin_menu():
     return [
@@ -135,50 +140,81 @@ async def del_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     save_json("bot_db.json", bot_db)
     await update.message.reply_text(f"✅ {code} 已删除")
 
-# ==================== 上传：加密后再存到 TG ====================
+# ==================== 上传：彻底修复版（用临时文件兼容API）====================
 async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    u = update.effective_user
-    if is_banned(u.id):
-        return
-    msg = update.message
+    global BOT_SELF_ID
+    if BOT_SELF_ID is None:
+        me = await ctx.bot.get_me()
+        BOT_SELF_ID = me.id
 
+    u = update.effective_user
+    if is_banned(u.id) or is_bot_self(u.id):
+        return
+
+    msg = update.message
     file_obj = None
+    orig_type = ""
+    file_name = ""
+
     if msg.photo:
         file_obj = msg.photo[-1]
+        orig_type = "photo"
+        file_name = f"IMG_{datetime.now().strftime('%H%M%S')}.jpg"
     elif msg.video:
         file_obj = msg.video
+        orig_type = "video"
+        file_name = msg.video.file_name or f"VID_{datetime.now().strftime('%H%M%S')}.mp4"
     elif msg.document:
         file_obj = msg.document
+        orig_type = "doc"
+        file_name = msg.document.file_name or f"FILE_{datetime.now().strftime('%H%M%S')}.bin"
     else:
         return
 
+    temp_path = None
     try:
-        # 下载文件
+        # 1. 下载原始文件
         f = await ctx.bot.get_file(file_obj.file_id)
         file_bytes = await f.download_as_bytearray()
-        # 端到端加密
+
+        # 2. 端到端加密
         encrypted = xor_data(file_bytes, E2EE_KEY)
-        # 上传加密后的文件
-        sent_msg = await update.message.reply_document(
-            document=encrypted,
-            filename=f"{file_obj.file_id}.enc",
+
+        # 3. 写入临时文件（解决API不支持直接传字节流的问题）
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".enc") as temp_f:
+            temp_f.write(encrypted)
+            temp_path = temp_f.name
+
+        # 4. 上传加密后的临时文件
+        sent_msg = await msg.reply_document(
+            document=open(temp_path, "rb"),
+            filename=f"{file_name}.enc",
             disable_notification=True
         )
-        # 保存加密后的 file_id
+
+        # 5. 清理临时文件
+        os.unlink(temp_path)
+        temp_path = None
+
+        # 6. 保存文件信息
         enc_fid = sent_msg.document.file_id
         obj = {
             "type": "enc",
             "id": encode_file_id(enc_fid),
-            "name": file_obj.file_name or f"file_{datetime.now().strftime('%H%M%S')}",
-            "orig_type": "photo" if msg.photo else "video" if msg.video else "doc"
+            "name": file_name,
+            "orig_type": orig_type
         }
         if u.id not in user_sessions:
             user_sessions[u.id] = []
         user_sessions[u.id].append(obj)
-        await msg.reply_text(f"✅ 已加密收 {len(user_sessions[u.id])} 个\n/confirm 打包")
+
+        await msg.reply_text(f"✅ 加密成功！已收 {len(user_sessions[u.id])} 个\n/confirm 打包")
         await track(u.id, u.full_name, u.username)
+
     except Exception as e:
-        await msg.reply_text("❌ 加密上传失败")
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+        await msg.reply_text(f"❌ 加密上传失败：{str(e)[:100]}")
 
 async def confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user.id
@@ -210,9 +246,17 @@ async def skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
 
 async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global BOT_SELF_ID
+    if BOT_SELF_ID is None:
+        me = await ctx.bot.get_me()
+        BOT_SELF_ID = me.id
+
     u   = update.effective_user.id
     cid = update.effective_chat.id
     txt = update.message.text.strip()
+
+    if is_bot_self(u):
+        return
 
     if update.effective_user.id == ADMIN_USER_ID and cid in admin_ops:
         act = admin_ops.pop(cid)
@@ -264,26 +308,39 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         del pending_naming[u]
         return await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
 
-    # 提取码：自动解密
+    # 提取码：自动解密（兼容新文件）
     if len(txt) == 6:
         if txt not in bot_db:
             return await update.message.reply_text("❌ 不存在")
         pkg = bot_db[txt]
         await update.message.reply_text(f"📦 {pkg['name']}")
         for f in pkg["files"]:
+            temp_path = None
             try:
                 fid = decode_file_id(f["id"])
                 file = await ctx.bot.get_file(fid)
                 data = await file.download_as_bytearray()
                 decrypted = xor_data(data, E2EE_KEY)
+
+                # 解密后写入临时文件再发送
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(f["name"])[1]) as temp_f:
+                    temp_f.write(decrypted)
+                    temp_path = temp_f.name
+
                 if f.get("orig_type") == "photo":
-                    await update.message.reply_photo(decrypted, filename=f["name"])
+                    await update.message.reply_photo(open(temp_path, "rb"), filename=f["name"])
                 elif f.get("orig_type") == "video":
-                    await update.message.reply_video(decrypted, filename=f["name"])
+                    await update.message.reply_video(open(temp_path, "rb"), filename=f["name"])
                 else:
-                    await update.message.reply_document(decrypted, filename=f["name"])
+                    await update.message.reply_document(open(temp_path, "rb"), filename=f["name"])
+
+                os.unlink(temp_path)
+                temp_path = None
+
             except Exception as e:
-                await update.message.reply_text(f"⚠️ 无法解密：{f['name']}")
+                if temp_path and os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                await update.message.reply_text(f"⚠️ 无法解密：{f['name']}，错误：{str(e)[:80]}")
 
 # ==================== 管理员面板 ====================
 async def admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
