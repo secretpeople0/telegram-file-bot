@@ -57,7 +57,7 @@ BOT_SELF_ID = None  # 机器人自身ID，启动时自动获取，用于防循�
 
 def xor_data(data: bytes, key: bytes) -> bytes:
     key = key * (len(data) // len(key) + 1)
-    return bytes(d ^ k for d, k in zip(data, k))
+    return bytes(d ^ k for d, k in zip(data, key))
 
 # ==================== 跨机器人兼容层 ====================
 def get_file_unique_key(file_id):
@@ -467,7 +467,7 @@ def main():
     app.add_handler(CommandHandler("skip",    skip))
     app.add_handler(CommandHandler("admin",   admin))
     app.add_handler(CommandHandler("backup",  backup_cmd))
-    app.add_handler(CommandHandler("getdb",   getdb))
+    app.add_handler(CommandHandler("getdb",   getdb_cmd))
     app.add_handler(CallbackQueryHandler(admin_cb))
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handle))
