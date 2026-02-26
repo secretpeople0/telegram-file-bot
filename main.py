@@ -316,7 +316,8 @@ async def text_handle(update: Update, ctx: ContextTypes):
             token = f.get("data", "")
             fname = f.get("name", "文件")
             link = f"https://t.me/{username}?start={token}"
-            await update.message.reply_text(f"🔗 {fname}\n{link}")
+            # 关键修复：禁用网页预览，确保链接可点击
+            await update.message.reply_text(f"🔗 {fname}\n{link}", disable_web_page_preview=True)
         await update.message.reply_text("✅ 点击链接获取")
         return
 
