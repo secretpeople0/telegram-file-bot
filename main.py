@@ -132,18 +132,29 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if ctx.args:
         token = ctx.args[0]
         data = decrypt_metadata(token)
-        if data:
-            try:
-                await ctx.bot.forward_message(
-                    chat_id=update.effective_chat.id,
-                    from_chat_id=data["chat_id"],
-                    message_id=data["message_id"]
-                )
-            except:
-                await update.message.reply_text("❌ 文件已失效")
+        if not data:
+            await update.message.reply_text("❌ 链接无效或已过期")
+            return
+
+        try:
+            # 先检查目标 chat_id 是否可访问
+            await ctx.bot.get_chat(data["chat_id"])
+        except Exception as e:
+            await update.message.reply_text(f"❌ 无法访问存储频道：{str(e)[:80]}")
+            return
+
+        try:
+            # 转发文件
+            await ctx.bot.forward_message(
+                chat_id=update.effective_chat.id,
+                from_chat_id=data["chat_id"],
+                message_id=data["message_id"]
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ 文件转发失败：{str(e)[:80]}")
         return
 
-    await update.message.reply_text("📦 TG云盘机器人\n/my 我的提取码\n/del 提取码")
+    await update.message.reply_text("📦 TG云盘机器人（跨机器人永久版）\n/my 我的提取码\n/del 提取码")
 
 # ==================== my ====================
 async def my_codes(update: Update, ctx: ContextTypes):
