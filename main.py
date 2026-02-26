@@ -21,6 +21,9 @@ ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 STORE_CHAT_ID = os.environ.get("STORE_CHAT_ID", "")
 
+# 全局存储：短 ID -> token（解决按钮数据超长问题）
+id_to_token = {}
+
 # ==================== 加密核心 ====================
 E2EE_KEY = b"e2ee_secure_bot_2026"
 
@@ -213,7 +216,6 @@ async def upload(update: Update, ctx: ContextTypes):
             "name": name
         })
 
-        # 修复：从 update.effective_user 里取 full_name 和 username
         user = update.effective_user
         await track(u, user.full_name, user.username)
 
@@ -240,7 +242,6 @@ async def confirm(update: Update, ctx: ContextTypes):
         await update.message.reply_text("❌ 生成失败")
         return
 
-    # 修复：从 update.effective_user 里取 full_name
     user = update.effective_user
     pending_naming[u] = {
         "code": code,
@@ -265,8 +266,9 @@ async def skip(update: Update, ctx: ContextTypes):
     del pending_naming[u]
     await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
 
-# ==================== 按钮回调：直接发文件（最安全） ====================
+# ==================== 按钮回调：通过短 ID 找到 token ====================
 async def button_callback(update: Update, ctx: ContextTypes):
+    global id_to_token
     query = update.callback_query
     await query.answer()
 
@@ -275,7 +277,11 @@ async def button_callback(update: Update, ctx: ContextTypes):
         return
 
     if query.data.startswith("get_"):
-        token = query.data.replace("get_", "")
+        short_id = query.data.replace("get_", "")
+        if short_id not in id_to_token:
+            await query.edit_message_text("❌ 链接已过期或无效")
+            return
+        token = id_to_token[short_id]
         data = decrypt_metadata(token)
         if not data:
             await query.edit_message_text("❌ 无效或已过期")
@@ -290,10 +296,11 @@ async def button_callback(update: Update, ctx: ContextTypes):
         except Exception as e:
             await query.edit_message_text(f"❌ 失败：{str(e)[:60]}")
 
-# ==================== text_handle（纯内部安全版） ====================
+# ==================== text_handle（用短 ID 映射，解决按钮数据超长） ====================
 async def text_handle(update: Update, ctx: ContextTypes):
     global bot_db
     global BOT_SELF_ID
+    global id_to_token
     if BOT_SELF_ID is None:
         me = await ctx.bot.get_me()
         BOT_SELF_ID = me.id
@@ -327,8 +334,11 @@ async def text_handle(update: Update, ctx: ContextTypes):
             token = f.get("data", "")
             fname = f.get("name", "文件")
 
-            # 安全按钮：不跳转、不链接、不点 t.me
-            keyboard = [[InlineKeyboardButton(f"📥 取「{fname}」", callback_data=f"get_{token}")]]
+            # 生成 8 位短 ID，映射到 token，确保按钮数据不超长
+            short_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+            id_to_token[short_id] = token
+
+            keyboard = [[InlineKeyboardButton(f"📥 取「{fname}」", callback_data=f"get_{short_id}")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text(f"📄 {fname}", reply_markup=reply_markup)
         return
