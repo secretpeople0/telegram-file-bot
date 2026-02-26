@@ -2,7 +2,7 @@ import os
 import json
 import random
 import shutil
- string
+import string
 import base64
 import time
 from datetime import datetime
