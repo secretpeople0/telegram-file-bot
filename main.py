@@ -71,7 +71,7 @@ def save_json(name, data):
     with open(p, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# 强制确保数据类型正确
+# 全局数据，确保类型正确
 bot_db = load_json("bot_db.json")
 if not isinstance(bot_db, dict):
     bot_db = {}
@@ -252,14 +252,13 @@ async def confirm(update: Update, ctx: ContextTypes):
 
 # ==================== skip ====================
 async def skip(update: Update, ctx: ContextTypes):
+    global bot_db
     u = update.effective_user.id
     if u not in pending_naming:
         await update.message.reply_text("❌ 无任务")
         return
     pkg = pending_naming[u]
     pkg["name"] = f"文件包_{pkg['code']}"
-    if not isinstance(bot_db, dict):
-        bot_db = {}
     bot_db[pkg["code"]] = pkg
     save_json("bot_db.json", bot_db)
     auto_backup()
@@ -268,6 +267,7 @@ async def skip(update: Update, ctx: ContextTypes):
 
 # ==================== text_handle ====================
 async def text_handle(update: Update, ctx: ContextTypes):
+    global bot_db
     global BOT_SELF_ID
     if BOT_SELF_ID is None:
         me = await ctx.bot.get_me()
@@ -283,8 +283,6 @@ async def text_handle(update: Update, ctx: ContextTypes):
     if u in pending_naming:
         pkg = pending_naming[u]
         pkg["name"] = txt[:50]
-        if not isinstance(bot_db, dict):
-            bot_db = {}
         bot_db[pkg["code"]] = pkg
         save_json("bot_db.json", bot_db)
         auto_backup()
