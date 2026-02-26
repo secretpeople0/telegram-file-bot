@@ -17,12 +17,12 @@ from telegram.ext import (
     filters
 )
 
-# ==================== 防炸配置（不影响任何原有功能）====================
-RATE_LIMIT_MINUTE = 5       # 每分钟最多请求次数
-USER_COOLDOWN = 5           # 普通用户冷却秒数
+# ==================== 放宽后的防炸配置（更宽松，减少误拦截）====================
+RATE_LIMIT_MINUTE = 10      # 每分钟最多请求次数（从5次放宽到10次）
+USER_COOLDOWN = 2           # 普通用户冷却秒数（从5秒缩短到2秒）
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
 
-# 全局限流记录
+# 全局限流记录（内存中，重启清空，确保自动过期）
 user_request_times = {}
 
 def is_admin(user_id):
@@ -33,30 +33,33 @@ def check_rate_limit(user_id):
     if is_admin(user_id):
         return True
     now = time.time()
-    if user_id not in user_request_times:
-        user_request_times[user_id] = []
-    # 严格清理1分钟前的所有旧记录
-    user_request_times[user_id] = [t for t in user_request_times[user_id] if now - t < 60]
+    user_id_str = str(user_id)
+    if user_id_str not in user_request_times:
+        user_request_times[user_id_str] = []
+    # 严格清理1分钟前的所有旧记录，确保自动解除
+    user_request_times[user_id_str] = [t for t in user_request_times[user_id_str] if now - t < 60]
     # 如果当前记录数 >= 限制，返回False
-    if len(user_request_times[user_id]) >= RATE_LIMIT_MINUTE:
+    if len(user_request_times[user_id_str]) >= RATE_LIMIT_MINUTE:
         return False
     # 否则记录本次请求时间
-    user_request_times[user_id].append(now)
+    user_request_times[user_id_str].append(now)
     return True
 
 def check_cooldown(user_id):
     if is_admin(user_id):
         return True
     now = time.time()
-    if user_id not in user_request_times or len(user_request_times[user_id]) == 0:
+    user_id_str = str(user_id)
+    if user_id_str not in user_request_times or len(user_request_times[user_id_str]) == 0:
         return True
-    last = user_request_times[user_id][-1]
+    last = user_request_times[user_id_str][-1]
     return now - last >= USER_COOLDOWN
 
 # 新增：手动重置用户限流状态（管理员可用）
 def reset_user_limit(user_id):
-    if user_id in user_request_times:
-        del user_request_times[user_id]
+    user_id_str = str(user_id)
+    if user_id_str in user_request_times:
+        del user_request_times[user_id_str]
 
 # ==================== 真正端到端加密（E2EE）TG 无法检测内容 ====================
 E2EE_KEY = b"e2ee_secure_bot_2026"
@@ -193,7 +196,7 @@ async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if is_banned(u.id) or is_bot_self(u.id):
         return
 
-    # 防炸限流
+    # 防炸限流（使用放宽后的规则）
     if not check_rate_limit(u.id) or not check_cooldown(u.id):
         return await update.message.reply_text("⚠️ 请求过快，请稍后再试")
 
@@ -273,7 +276,7 @@ async def confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user.id
     if u not in user_sessions or not user_sessions[u]:
         return await update.message.reply_text("❌ 暂无文件")
-    if not check_rate_limit(u.id) or not check_cooldown(u.id):
+    if not check_rate_limit(u) or not check_cooldown(u):
         return await update.message.reply_text("⚠️ 请求过快，请稍后再试")
     chars = string.ascii_letters + string.digits
     while True:
@@ -292,7 +295,7 @@ async def skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user.id
     if u not in pending_naming:
         return await update.message.reply_text("❌ 无待打包")
-    if not check_rate_limit(u.id) or not check_cooldown(u.id):
+    if not check_rate_limit(u) or not check_cooldown(u):
         return await update.message.reply_text("⚠️ 请求过快，请稍后再试")
     pkg = pending_naming[u]
     pkg["name"] = f"包_{pkg['code']}"
@@ -315,7 +318,7 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if is_bot_self(u):
         return
 
-    # 全局防炸
+    # 全局防炸（使用放宽后的规则）
     if not is_admin(u) and (not check_rate_limit(u) or not check_cooldown(u)):
         return
 
@@ -369,7 +372,7 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         del pending_naming[u]
         return await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
 
-    # 提取码：自动解密（防重复刷屏 + 超时熔断）
+    # 提取码：自动解密（防重复刷屏 + 超时熔断，使用放宽后的规则）
     if len(txt) == 6:
         if not is_admin(u) and (not check_rate_limit(u) or not check_cooldown(u)):
             return await update.message.reply_text("⚠️ 请求频繁，请稍后再试")
