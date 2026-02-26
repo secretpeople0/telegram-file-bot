@@ -5,6 +5,7 @@ import shutil
 import string
 import base64
 import time
+import re
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -34,14 +35,14 @@ def encrypt_metadata(metadata: dict) -> str:
     try:
         raw = json.dumps(metadata).encode("utf-8")
         encrypted = xor_data(raw, E2EE_KEY)
-        return base64.urlsafe64encode(encrypted).decode("utf-8").replace("=", "")
+        return base64.urlsafe_b64encode(encrypted).decode("utf-8").replace("=", "")
     except:
         return ""
 
 def decrypt_metadata(encrypted_str: str) -> dict:
     try:
         encrypted_str += "=" * ((4 - len(encrypted_str) % 4) % 4)
-        raw = base64.urlsafe64decode(encrypted_str.encode("utf-8"))
+        raw = base64.urlsafe_b64decode(encrypted_str.encode("utf-8"))
         decrypted = xor_data(raw, E2EE_KEY)
         return json.loads(decrypted.decode("utf-8"))
     except:
@@ -325,7 +326,7 @@ async def button_callback(update: Update, ctx: ContextTypes):
             text=f"✅ 「{pkg['name']}」全部发送完成"
         )
 
-# ==================== text_handle ====================
+# ==================== text_handle（全局智能识别6位取件码） ====================
 async def text_handle(update: Update, ctx: ContextTypes):
     global bot_db, BOT_SELF_ID, id_to_token
     if BOT_SELF_ID is None:
@@ -348,29 +349,35 @@ async def text_handle(update: Update, ctx: ContextTypes):
         await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
         return
 
-    if len(txt) == 6:
-        if txt not in bot_db:
-            await update.message.reply_text("❌ 不存在")
-            return
-        pkg = bot_db[txt]
-        await update.message.reply_text(f"📦 {pkg['name']}")
-
-        keyboard_all = [[InlineKeyboardButton("📥 一键取全部", callback_data=f"all_{txt}")]]
-        await update.message.reply_text("⚡ 点我一次性取完所有文件",
-            reply_markup=InlineKeyboardMarkup(keyboard_all))
-
-        for f in pkg.get("files", []):
-            if not isinstance(f, dict):
-                continue
-            token = f.get("data", "")
-            fname = f.get("name", "文件")
-            short_id = ''.join(random.choices(string.ascii_letters+string.digits, k=8))
-            id_to_token[short_id] = token
-            kb = [[InlineKeyboardButton(f"📥 取 {fname}", callback_data=f"get_{short_id}")]]
-            await update.message.reply_text(f"📄 {fname}", reply_markup=InlineKeyboardMarkup(kb))
+    # 全局智能识别：从任意文本中提取 6 位大小写字母+数字
+    pattern = re.compile(r'[A-Za-z0-9]{6}')
+    match = pattern.search(txt)
+    if not match:
         return
 
-# ==================== 管理员面板（增强优化版） ====================
+    code = match.group()
+    if code not in bot_db:
+        await update.message.reply_text("❌ 提取码不存在")
+        return
+
+    pkg = bot_db[code]
+    await update.message.reply_text(f"📦 已识别提取码：{code}｜{pkg['name']}")
+
+    keyboard_all = [[InlineKeyboardButton("📥 一键取全部", callback_data=f"all_{code}")]]
+    await update.message.reply_text("⚡ 点我一次性取完所有文件",
+        reply_markup=InlineKeyboardMarkup(keyboard_all))
+
+    for f in pkg.get("files", []):
+        if not isinstance(f, dict):
+            continue
+        token = f.get("data", "")
+        fname = f.get("name", "文件")
+        short_id = ''.join(random.choices(string.ascii_letters+string.digits, k=8))
+        id_to_token[short_id] = token
+        kb = [[InlineKeyboardButton(f"📥 取 {fname}", callback_data=f"get_{short_id}")]]
+        await update.message.reply_text(f"📄 {fname}", reply_markup=InlineKeyboardMarkup(kb))
+
+# ==================== 管理员面板（增强+批量删除） ====================
 async def admin(update: Update, ctx: ContextTypes):
     uid = update.effective_user.id
     if not is_admin(uid):
@@ -388,7 +395,7 @@ async def admin(update: Update, ctx: ContextTypes):
         "/userinfo 用户ID - 查看该用户上传的所有文件码+文件名\n"
         "/list - 全部提取码+文件名\n"
         "/search 关键词 - 搜索（显示 码+文件名）\n"
-        "/admindel 码 - 强制删除\n"
+        "/admindel 码1 码2 ... - 批量删除取件码\n"
         "/ban ID - 封禁用户\n"
         "/unban ID - 解封\n"
         "/banlist - 黑名单"
@@ -405,7 +412,6 @@ async def admin_stats(update: Update, ctx: ContextTypes):
         f"黑名单：{len(banned)}"
     )
 
-# 1. 查看所有用户ID
 async def admin_userlist(update: Update, ctx: ContextTypes):
     if not is_admin(update.effective_user.id):
         return
@@ -415,7 +421,6 @@ async def admin_userlist(update: Update, ctx: ContextTypes):
         msg = "\n".join(lines[:30]) + "\n...仅显示前30条"
     await update.message.reply_text(msg)
 
-# 2. 查看单个用户上传的所有文件：提取码 + 文件名
 async def admin_userinfo(update: Update, ctx: ContextTypes):
     if not is_admin(update.effective_user.id):
         return
@@ -435,7 +440,6 @@ async def admin_userinfo(update: Update, ctx: ContextTypes):
         return
     await update.message.reply_text("\n".join(found))
 
-# 3. 列出所有提取码 + 文件名
 async def admin_list(update: Update, ctx: ContextTypes):
     if not is_admin(update.effective_user.id):
         return
@@ -445,7 +449,6 @@ async def admin_list(update: Update, ctx: ContextTypes):
     lines = [f"{code}｜{pkg.get('name', '未命名')}" for code, pkg in list(bot_db.items())[:50]]
     await update.message.reply_text("\n".join(lines))
 
-# 4. 搜索：显示 提取码+文件名
 async def admin_search(update: Update, ctx: ContextTypes):
     if not is_admin(update.effective_user.id):
         return
@@ -464,20 +467,30 @@ async def admin_search(update: Update, ctx: ContextTypes):
         return
     await update.message.reply_text("\n".join(res[:30]))
 
+# 批量删除取件码
 async def admin_del(update: Update, ctx: ContextTypes):
     if not is_admin(update.effective_user.id):
         return
     parts = update.message.text.split()
-    if len(parts)<2:
-        await update.message.reply_text("/admindel 提取码")
+    if len(parts) < 2:
+        await update.message.reply_text("/admindel 码1 码2 码3 ... 批量删除")
         return
-    code = parts[1]
-    if code in bot_db:
-        del bot_db[code]
-        save_json("bot_db.json", bot_db)
-        await update.message.reply_text(f"✅ 已删：{code}")
-    else:
-        await update.message.reply_text("❌ 不存在")
+    codes = parts[1:]
+    deleted = []
+    not_found = []
+    for code in codes:
+        if code in bot_db:
+            del bot_db[code]
+            deleted.append(code)
+        else:
+            not_found.append(code)
+    save_json("bot_db.json", bot_db)
+    msg = ""
+    if deleted:
+        msg += f"✅ 已删除：{' '.join(deleted)}\n"
+    if not_found:
+        msg += f"❌ 不存在：{' '.join(not_found)}"
+    await update.message.reply_text(msg.strip())
 
 async def ban_user(update: Update, ctx: ContextTypes):
     if not is_admin(update.effective_user.id):
@@ -538,7 +551,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handle))
 
-    print("✅ 机器人启动成功 —— 管理员面板已增强")
+    print("✅ 机器人启动成功 — 批量删除+全局取件码已生效")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
