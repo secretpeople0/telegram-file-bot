@@ -5,6 +5,7 @@ import shutil
 import string
 import base64
 import tempfile
+import time
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -16,13 +17,47 @@ from telegram.ext import (
     filters
 )
 
+# ==================== 防炸配置（不影响任何原有功能）====================
+RATE_LIMIT_MINUTE = 5       # 每分钟最多请求次数
+USER_COOLDOWN = 5           # 普通用户冷却秒数
+ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
+
+# 全局限流记录
+user_request_times = {}
+
+def is_admin(user_id):
+    return user_id == ADMIN_USER_ID
+
+def check_rate_limit(user_id):
+    # 管理员不限流
+    if is_admin(user_id):
+        return True
+    now = time.time()
+    if user_id not in user_request_times:
+        user_request_times[user_id] = []
+    # 只保留1分钟内的记录
+    user_request_times[user_id] = [t for t in user_request_times[user_id] if now - t < 60]
+    if len(user_request_times[user_id]) >= RATE_LIMIT_MINUTE:
+        return False
+    user_request_times[user_id].append(now)
+    return True
+
+def check_cooldown(user_id):
+    if is_admin(user_id):
+        return True
+    now = time.time()
+    if user_id not in user_request_times or len(user_request_times[user_id]) == 0:
+        return True
+    last = user_request_times[user_id][-1]
+    return now - last >= USER_COOLDOWN
+
 # ==================== 真正端到端加密（E2EE）TG 无法检测内容 ====================
 E2EE_KEY = b"e2ee_secure_bot_2026"
 BOT_SELF_ID = None  # 机器人自身ID，启动时自动获取，用于防循环
 
 def xor_data(data: bytes, key: bytes) -> bytes:
     key = key * (len(data) // len(key) + 1)
-    return bytes(d ^ k for d, k in zip(data, key))
+    return bytes(d ^ k for d, k in zip(data, k))
 
 # ==================== 跨机器人兼容层 ====================
 def get_file_unique_key(file_id):
@@ -48,7 +83,6 @@ def decode_file_id(encoded_id: str) -> str:
 
 # ==================== 核心配置 ====================
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
 
 DATA_DIR = "/data"
 BACKUP_DIR = os.path.join(DATA_DIR, "backup")
@@ -151,6 +185,10 @@ async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if is_banned(u.id) or is_bot_self(u.id):
         return
 
+    # 防炸限流
+    if not check_rate_limit(u.id) or not check_cooldown(u.id):
+        return await update.message.reply_text("⚠️ 请求过快，请稍后再试")
+
     msg = update.message
     file_obj = None
     orig_type = ""
@@ -174,13 +212,13 @@ async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     temp_path = None
     try:
         # 1. 下载原始文件
-        f = await ctx.bot.get_file(file_obj.file_id, read_timeout=30)
-        file_bytes = await f.download_as_bytearray(read_timeout=30)
+        f = await ctx.bot.get_file(file_obj.file_id, read_timeout=15)
+        file_bytes = await f.download_as_bytearray(read_timeout=15)
 
         # 2. 端到端加密
         encrypted = xor_data(file_bytes, E2EE_KEY)
 
-        # 3. 写入临时文件（解决API不支持直接传字节流的问题）
+        # 3. 写入临时文件
         with tempfile.NamedTemporaryFile(delete=False, suffix=".enc") as temp_f:
             temp_f.write(encrypted)
             temp_path = temp_f.name
@@ -190,10 +228,10 @@ async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             document=open(temp_path, "rb"),
             filename=f"{file_name}.enc",
             disable_notification=True,
-            read_timeout=30
+            read_timeout=15
         )
 
-        # 5. 立刻删除这条 .enc 文件消息（关键新增！）
+        # 5. 立刻删除这条 .enc 文件消息
         await ctx.bot.delete_message(
             chat_id=sent_msg.chat.id,
             message_id=sent_msg.message_id
@@ -227,6 +265,8 @@ async def confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user.id
     if u not in user_sessions or not user_sessions[u]:
         return await update.message.reply_text("❌ 暂无文件")
+    if not check_rate_limit(u.id) or not check_cooldown(u.id):
+        return await update.message.reply_text("⚠️ 请求过快，请稍后再试")
     chars = string.ascii_letters + string.digits
     while True:
         code = ''.join(random.choice(chars) for _ in range(6))
@@ -244,6 +284,8 @@ async def skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user.id
     if u not in pending_naming:
         return await update.message.reply_text("❌ 无待打包")
+    if not check_rate_limit(u.id) or not check_cooldown(u.id):
+        return await update.message.reply_text("⚠️ 请求过快，请稍后再试")
     pkg = pending_naming[u]
     pkg["name"] = f"包_{pkg['code']}"
     bot_db[pkg["code"]] = pkg
@@ -263,6 +305,10 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
 
     if is_bot_self(u):
+        return
+
+    # 全局防炸
+    if not is_admin(u) and (not check_rate_limit(u) or not check_cooldown(u)):
         return
 
     if update.effective_user.id == ADMIN_USER_ID and cid in admin_ops:
@@ -315,8 +361,10 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         del pending_naming[u]
         return await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
 
-    # 提取码：自动解密（兼容新文件，增加超时）
+    # 提取码：自动解密（防重复刷屏 + 超时熔断）
     if len(txt) == 6:
+        if not is_admin(u) and (not check_rate_limit(u) or not check_cooldown(u)):
+            return await update.message.reply_text("⚠️ 请求频繁，请稍后再试")
         if txt not in bot_db:
             return await update.message.reply_text("❌ 不存在")
         pkg = bot_db[txt]
@@ -325,22 +373,20 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             temp_path = None
             try:
                 fid = decode_file_id(f["id"])
-                # 增加超时时间
-                file = await ctx.bot.get_file(fid, read_timeout=30, write_timeout=30, connect_timeout=30, pool_timeout=30)
-                data = await file.download_as_bytearray(connect_timeout=30, read_timeout=30)
+                file = await ctx.bot.get_file(fid, read_timeout=15, write_timeout=15, connect_timeout=10)
+                data = await file.download_as_bytearray(connect_timeout=10, read_timeout=15)
                 decrypted = xor_data(data, E2EE_KEY)
 
-                # 解密后写入临时文件再发送
                 with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(f["name"])[1]) as temp_f:
                     temp_f.write(decrypted)
                     temp_path = temp_f.name
 
                 if f.get("orig_type") == "photo":
-                    await update.message.reply_photo(open(temp_path, "rb"), filename=f["name"], read_timeout=30)
+                    await update.message.reply_photo(open(temp_path, "rb"), filename=f["name"], read_timeout=15)
                 elif f.get("orig_type") == "video":
-                    await update.message.reply_video(open(temp_path, "rb"), filename=f["name"], read_timeout=30)
+                    await update.message.reply_video(open(temp_path, "rb"), filename=f["name"], read_timeout=15)
                 else:
-                    await update.message.reply_document(open(temp_path, "rb"), filename=f["name"], read_timeout=30)
+                    await update.message.reply_document(open(temp_path, "rb"), filename=f["name"], read_timeout=15)
 
                 os.unlink(temp_path)
                 temp_path = None
@@ -348,7 +394,7 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 if temp_path and os.path.exists(temp_path):
                     os.unlink(temp_path)
-                await update.message.reply_text(f"⚠️ 无法解密：{f['name']}，错误：{str(e)[:80]}")
+                await update.message.reply_text(f"⚠️ 无法解密：{f['name']}")
 
 # ==================== 管理员面板 ====================
 async def admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -375,7 +421,6 @@ async def admin_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
 
     elif act == "用户列表":
-        # 显示全部用户
         lines = [f"{uid}｜{d['name']}" for uid,d in user_idx.items()]
         text = "\n".join(lines) if lines else "无用户"
         if len(text) > 4000:
@@ -422,7 +467,7 @@ def main():
     app.add_handler(CommandHandler("skip",    skip))
     app.add_handler(CommandHandler("admin",   admin))
     app.add_handler(CommandHandler("backup",  backup_cmd))
-    app.add_handler(CommandHandler("getdb",   getdb_cmd))
+    app.add_handler(CommandHandler("getdb",   getdb))
     app.add_handler(CallbackQueryHandler(admin_cb))
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handle))
