@@ -2,7 +2,7 @@ import os
 import json
 import random
 import shutil
-import string
+string
 import base64
 import tempfile
 import time
@@ -159,7 +159,7 @@ async def del_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     save_json("bot_db.json", bot_db)
     await update.message.reply_text(f"✅ 提取码 {code} 已删除")
 
-# ==================== 上传：直链模式（已修复大文件问题）====================
+# ==================== 【已修复：突破文件大小限制，不调用 get_file】 ====================
 async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global BOT_SELF_ID
     if BOT_SELF_ID is None:
@@ -171,41 +171,32 @@ async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = update.message
-    file_obj = None
+    file_id = None
     orig_type = ""
     file_name = ""
     file_size = 0
 
     if msg.photo:
-        file_obj = msg.photo[-1]
+        file_id = msg.photo[-1].file_id
         orig_type = "photo"
         file_name = f"IMG_{datetime.now().strftime('%H%M%S')}.jpg"
-        file_size = file_obj.file_size or 0
     elif msg.video:
-        file_obj = msg.video
+        file_id = msg.video.file_id
         orig_type = "video"
         file_name = msg.video.file_name or f"VID_{datetime.now().strftime('%H%M%S')}.mp4"
-        file_size = msg.video.file_size or 0
     elif msg.document:
-        file_obj = msg.document
+        file_id = msg.document.file_id
         orig_type = "doc"
-        file_name = msg.document.file_name or f"FILE_{datetime.now().strftime('%H%M%S')}.bin"
-        file_size = msg.document.file_size or 0
+        file_name = msg.document.file_name or f"FILE_{datetime.now().strftime('%H%M%S')}"
     else:
         return
 
     try:
-        # 只获取文件信息，不下载！彻底解决大文件报错
-        file_info = await ctx.bot.get_file(file_obj.file_id)
-        file_path = file_info.file_path
-        file_link = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-
+        # 不调用 get_file，彻底突破大小限制
         metadata = {
-            "link": file_link,
-            "file_id": file_obj.file_id,
+            "file_id": file_id,
             "name": file_name,
             "type": orig_type,
-            "size": file_size
         }
 
         encrypted_meta = encrypt_metadata(metadata)
@@ -224,13 +215,11 @@ async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(
             f"✅ 直链加密成功！已接收 {len(user_sessions[u.id])} 个文件\n"
             f"📄 {file_name}\n"
-            f"📏 {file_size / 1024 / 1024:.2f}MB\n"
             f"/confirm 打包 | /skip 跳过命名"
         )
         await track(u.id, u.full_name, u.username)
 
     except Exception as e:
-        # 这里不再乱报 2GB 限制
         await msg.reply_text(f"❌ 上传失败：{str(e)[:100]}")
 
 async def confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -292,10 +281,10 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             save_json("bot_db.json", bot_db)
             return await update.message.reply_text(f"✅ 已删：{' '.join(dels)}\n❌ 不存在：{' '.join(nf)}")
         if act == "search":
-            res = [f"{c}｜{p['name']}" for c, p in bot_db.items() if txt.lower() in p['name'].lower()]
+            res = [f"🔑 {c}｜{p['name']}" for c, p in bot_db.items() if txt.lower() in p['name'].lower()]
             return await update.message.reply_text("\n".join(res) if res else "🔍 无结果")
         if act == "user_uploads":
-            res = [f"{c}｜{p['name']}" for c, p in bot_db.items() if str(p['uploader']['id']) == txt.strip()]
+            res = [f"🔑 {c}｜{p['name']}" for c, p in bot_db.items() if str(p["uploader"]["id"]) == txt.strip()]
             return await update.message.reply_text("\n".join(res) if res else "🔍 无记录")
         if act == "ban":
             parts = txt.split()
