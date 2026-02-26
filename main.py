@@ -213,8 +213,11 @@ async def upload(update: Update, ctx: ContextTypes):
             "name": name
         })
 
+        # 修复：从 update.effective_user 里取 full_name 和 username
+        user = update.effective_user
+        await track(u, user.full_name, user.username)
+
         await msg.reply_text(f"✅ 存储成功！\n📄 {name}\n💡 /confirm 打包 /skip 跳过")
-        await track(u, u.full_name, u.username)
 
     except Exception as e:
         await msg.reply_text(f"❌ 上传失败：{str(e)[:100]}")
@@ -237,10 +240,12 @@ async def confirm(update: Update, ctx: ContextTypes):
         await update.message.reply_text("❌ 生成失败")
         return
 
+    # 修复：从 update.effective_user 里取 full_name
+    user = update.effective_user
     pending_naming[u] = {
         "code": code,
         "files": user_sessions[u],
-        "uploader": {"id": u, "name": update.effective_user.full_name}
+        "uploader": {"id": u, "name": user.full_name}
     }
     del user_sessions[u]
     await update.message.reply_text("📦 输入包名，或 /skip")
