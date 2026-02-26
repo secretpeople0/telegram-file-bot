@@ -71,7 +71,6 @@ def save_json(name, data):
     with open(p, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# 全局数据，确保类型正确
 bot_db = load_json("bot_db.json")
 if not isinstance(bot_db, dict):
     bot_db = {}
@@ -110,18 +109,6 @@ def auto_backup():
     except:
         pass
 
-# ==================== 菜单 ====================
-def admin_menu():
-    return [
-        [InlineKeyboardButton("📊 统计", callback_data="统计")],
-        [InlineKeyboardButton("👥 用户列表", callback_data="用户列表")],
-        [InlineKeyboardButton("🔍 搜文件", callback_data="搜文件")],
-        [InlineKeyboardButton("👁️ 查用户上传", callback_data="查用户上传")],
-        [InlineKeyboardButton("🗑️ 删提取码", callback_data="删提取码")],
-        [InlineKeyboardButton("🚫 封禁/解封", callback_data="封禁/解封")],
-        [InlineKeyboardButton("🔙 返回", callback_data="返回")]
-    ]
-
 # ==================== start ====================
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global BOT_SELF_ID
@@ -137,14 +124,12 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         try:
-            # 先检查目标 chat_id 是否可访问
             await ctx.bot.get_chat(data["chat_id"])
         except Exception as e:
             await update.message.reply_text(f"❌ 无法访问存储频道：{str(e)[:80]}")
             return
 
         try:
-            # 转发文件
             await ctx.bot.forward_message(
                 chat_id=update.effective_chat.id,
                 from_chat_id=data["chat_id"],
@@ -154,7 +139,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ 文件转发失败：{str(e)[:80]}")
         return
 
-    await update.message.reply_text("📦 TG云盘机器人（跨机器人永久版）\n/my 我的提取码\n/del 提取码")
+    await update.message.reply_text("📦 TG云盘机器人\n/my 我的提取码\n/del 提取码")
 
 # ==================== my ====================
 async def my_codes(update: Update, ctx: ContextTypes):
@@ -276,7 +261,7 @@ async def skip(update: Update, ctx: ContextTypes):
     del pending_naming[u]
     await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
 
-# ==================== text_handle ====================
+# ==================== text_handle（最终修复版：按钮 + 链接双触发） ====================
 async def text_handle(update: Update, ctx: ContextTypes):
     global bot_db
     global BOT_SELF_ID
@@ -290,7 +275,7 @@ async def text_handle(update: Update, ctx: ContextTypes):
     if u == BOT_SELF_ID or is_banned(u):
         return
 
-    # 命名
+    # 命名流程
     if u in pending_naming:
         pkg = pending_naming[u]
         pkg["name"] = txt[:50]
@@ -301,7 +286,7 @@ async def text_handle(update: Update, ctx: ContextTypes):
         await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
         return
 
-    # 提取码
+    # 输入6位提取码
     if len(txt) == 6:
         if txt not in bot_db:
             await update.message.reply_text("❌ 不存在")
@@ -310,15 +295,23 @@ async def text_handle(update: Update, ctx: ContextTypes):
         me_user = await ctx.bot.get_me()
         username = me_user.username
         await update.message.reply_text(f"📦 {pkg['name']}")
+
         for f in pkg.get("files", []):
             if not isinstance(f, dict):
                 continue
             token = f.get("data", "")
             fname = f.get("name", "文件")
             link = f"https://t.me/{username}?start={token}"
-            # 关键修复：禁用网页预览，确保链接可点击
-            await update.message.reply_text(f"🔗 {fname}\n{link}", disable_web_page_preview=True)
-        await update.message.reply_text("✅ 点击链接获取")
+
+            # ✅ 关键修复：发送 取件按钮 + 链接（禁用预览）
+            keyboard = [[InlineKeyboardButton(f"📥 点击取「{fname}」", url=link)]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                f"🔗 {fname}\n{link}",
+                disable_web_page_preview=True,
+                reply_markup=reply_markup
+            )
+        await update.message.reply_text("✅ 点按钮即可取件，永不失效")
         return
 
 # ==================== admin ====================
@@ -326,31 +319,7 @@ async def admin(update: Update, ctx: ContextTypes):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("❌ 无权限")
         return
-    await update.message.reply_text("👮 面板", reply_markup=InlineKeyboardMarkup(admin_menu()))
-
-async def admin_cb(update: Update, ctx: ContextTypes):
-    q = update.callback_query
-    await q.answer()
-    if q.from_user.id != ADMIN_USER_ID:
-        return
-    await q.edit_message_text("ℹ️ 功能暂未启用", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="返回")]]))
-
-async def backup_cmd(update: Update, ctx: ContextTypes):
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("❌ 无权限")
-        return
-    auto_backup()
-    await update.message.reply_text("✅ 备份完成")
-
-async def getdb_cmd(update: Update, ctx: ContextTypes):
-    if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("❌ 无权限")
-        return
-    for f in ["bot_db.json", "user_index.json", "banned.json"]:
-        p = os.path.join(DATA_DIR, f)
-        if os.path.exists(p):
-            await update.message.reply_document(open(p, "rb"))
-    await update.message.reply_text("✅ 已发送")
+    await update.message.reply_text("👮 管理面板")
 
 # ==================== 启动 ====================
 def main():
@@ -365,10 +334,7 @@ def main():
     app.add_handler(CommandHandler("confirm", confirm))
     app.add_handler(CommandHandler("skip", skip))
     app.add_handler(CommandHandler("admin", admin))
-    app.add_handler(CommandHandler("backup", backup_cmd))
-    app.add_handler(CommandHandler("getdb", getdb_cmd))
 
-    app.add_handler(CallbackQueryHandler(admin_cb))
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handle))
 
