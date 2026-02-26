@@ -35,10 +35,12 @@ def check_rate_limit(user_id):
     now = time.time()
     if user_id not in user_request_times:
         user_request_times[user_id] = []
-    # 只保留1分钟内的记录
+    # 严格清理1分钟前的所有旧记录
     user_request_times[user_id] = [t for t in user_request_times[user_id] if now - t < 60]
+    # 如果当前记录数 >= 限制，返回False
     if len(user_request_times[user_id]) >= RATE_LIMIT_MINUTE:
         return False
+    # 否则记录本次请求时间
     user_request_times[user_id].append(now)
     return True
 
@@ -50,6 +52,11 @@ def check_cooldown(user_id):
         return True
     last = user_request_times[user_id][-1]
     return now - last >= USER_COOLDOWN
+
+# 新增：手动重置用户限流状态（管理员可用）
+def reset_user_limit(user_id):
+    if user_id in user_request_times:
+        del user_request_times[user_id]
 
 # ==================== 真正端到端加密（E2EE）TG 无法检测内容 ====================
 E2EE_KEY = b"e2ee_secure_bot_2026"
@@ -146,6 +153,7 @@ def admin_menu():
         [InlineKeyboardButton("👁️ 查用户上传", callback_data="查用户上传")],
         [InlineKeyboardButton("🗑️ 删提取码", callback_data="删提取码")],
         [InlineKeyboardButton("🚫 封禁/解封", callback_data="封禁/解封")],
+        [InlineKeyboardButton("🔄 重置限流", callback_data="重置限流")],
         [InlineKeyboardButton("🔙 返回", callback_data="返回")]
     ]
 
@@ -444,6 +452,9 @@ async def admin_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         admin_ops[cid] = "ban"
         await q.edit_message_text("🚫 格式：封禁 123 / 解封 123",
                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
+    elif act == "重置限流":
+        reset_user_limit(q.from_user.id)
+        await q.edit_message_text("👮 管理面板\n✅ 已重置你的限流状态", reply_markup=InlineKeyboardMarkup(admin_menu()))
 
 async def backup_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID: return
