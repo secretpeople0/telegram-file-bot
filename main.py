@@ -21,7 +21,6 @@ ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 STORE_CHAT_ID = os.environ.get("STORE_CHAT_ID", "")
 
-# 全局存储：短 ID -> token（解决按钮数据超长问题）
 id_to_token = {}
 
 # ==================== 加密核心 ====================
@@ -141,7 +140,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ 文件转发失败：{str(e)[:80]}")
         return
 
-    await update.message.reply_text("📦 TG云盘机器人\n/my 我的提取码\n/del 提取码")
+    await update.message.reply_text("📦 TG文件云盘机器人\n/my 我的提取码\n/del 提取码")
 
 # ==================== my ====================
 async def my_codes(update: Update, ctx: ContextTypes):
@@ -163,7 +162,7 @@ async def del_code(update: Update, ctx: ContextTypes):
     if code not in bot_db:
         await update.message.reply_text("❌ 提取码不存在")
         return
-    if str(bot_db[code]["uploader"]["id"]) != str(uid):
+    if str(bot_db[code]["uploader"]["id"]) != str(uid) and not is_admin(uid):
         await update.message.reply_text("❌ 只能删除自己的")
         return
     del bot_db[code]
@@ -234,7 +233,7 @@ async def confirm(update: Update, ctx: ContextTypes):
     chars = string.ascii_letters + string.digits
     code = None
     for _ in range(50):
-        candidate = ''.join(random.choice(chars) for _ in range(6))
+        candidate = ''.join(random.choice(chars, k=6))
         if candidate not in bot_db:
             code = candidate
             break
@@ -266,7 +265,7 @@ async def skip(update: Update, ctx: ContextTypes):
     del pending_naming[u]
     await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
 
-# ==================== 按钮回调：一键取全部 ====================
+# ==================== 一键取全部 & 按钮回调 ====================
 async def button_callback(update: Update, ctx: ContextTypes):
     global id_to_token, bot_db
     query = update.callback_query
@@ -302,7 +301,7 @@ async def button_callback(update: Update, ctx: ContextTypes):
             await query.edit_message_text("❌ 提取码不存在")
             return
         pkg = bot_db[code]
-        await query.edit_message_text(f"📦 正在发送「{pkg['name']}」的所有文件...")
+        await query.edit_message_text(f"📦 正在发送「{pkg['name']}」所有文件...")
         for f in pkg.get("files", []):
             if not isinstance(f, dict):
                 continue
@@ -319,14 +318,14 @@ async def button_callback(update: Update, ctx: ContextTypes):
             except Exception as e:
                 await ctx.bot.send_message(
                     chat_id=query.from_user.id,
-                    text=f"❌ {f.get('name', '文件')} 发送失败：{str(e)[:60]}"
+                    text=f"❌ {f.get('name','文件')} 发送失败"
                 )
         await ctx.bot.send_message(
             chat_id=query.from_user.id,
-            text=f"✅ 「{pkg['name']}」的所有文件已发送完毕"
+            text=f"✅ 「{pkg['name']}」全部发送完成"
         )
 
-# ==================== text_handle（增加一键取全部） ====================
+# ==================== text_handle ====================
 async def text_handle(update: Update, ctx: ContextTypes):
     global bot_db, BOT_SELF_ID, id_to_token
     if BOT_SELF_ID is None:
@@ -356,30 +355,119 @@ async def text_handle(update: Update, ctx: ContextTypes):
         pkg = bot_db[txt]
         await update.message.reply_text(f"📦 {pkg['name']}")
 
-        # 先出「一键取全部」按钮
-        keyboard_all = [[InlineKeyboardButton(f"📥 一键取全部「{pkg['name']}」", callback_data=f"all_{pkg['code']}")]]
-        reply_markup_all = InlineKeyboardMarkup(keyboard_all)
-        await update.message.reply_text(f"📦 一键获取全部文件", reply_markup=reply_markup_all)
+        keyboard_all = [[InlineKeyboardButton("📥 一键取全部", callback_data=f"all_{txt}")]]
+        await update.message.reply_text("⚡ 点我一次性取完所有文件",
+            reply_markup=InlineKeyboardMarkup(keyboard_all))
 
-        # 再出单个文件按钮
         for f in pkg.get("files", []):
             if not isinstance(f, dict):
                 continue
             token = f.get("data", "")
             fname = f.get("name", "文件")
-            short_id = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+            short_id = ''.join(random.choices(string.ascii_letters+string.digits,k=8))
             id_to_token[short_id] = token
-            keyboard = [[InlineKeyboardButton(f"📥 取「{fname}」", callback_data=f"get_{short_id}")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(f"📄 {fname}", reply_markup=reply_markup)
+            kb = [[InlineKeyboardButton(f"📥 取 {fname}", callback_data=f"get_{short_id}")]]
+            await update.message.reply_text(f"📄 {fname}", reply_markup=InlineKeyboardMarkup(kb))
         return
 
-# ==================== admin ====================
+# ==================== 管理员面板（完整版！不再空白） ====================
 async def admin(update: Update, ctx: ContextTypes):
-    if update.effective_user.id != ADMIN_USER_ID:
+    uid = update.effective_user.id
+    if not is_admin(uid):
         await update.message.reply_text("❌ 无权限")
         return
-    await update.message.reply_text("👮 管理面板")
+
+    text = (
+        "🔐 管理员面板\n\n"
+        f"📦 总提取码：{len(bot_db)} 个\n"
+        f"👤 总用户数：{len(user_idx)} 人\n"
+        f"🚫 黑名单：{len(banned)} 人\n\n"
+        "管理员命令：\n"
+        "/stats - 统计信息\n"
+        "/list - 全部提取码\n"
+        "/search 关键词 - 搜索提取码\n"
+        "/admindel 码 - 强制删除\n"
+        "/ban ID - 封禁用户\n"
+        "/unban ID - 解封\n"
+        "/banlist - 黑名单"
+    )
+    await update.message.reply_text(text)
+
+async def admin_stats(update: Update, ctx: ContextTypes):
+    if not is_admin(update.effective_user.id):
+        return
+    await update.message.reply_text(
+        f"📊 统计\n"
+        f"提取码：{len(bot_db)}\n"
+        f"用户：{len(user_idx)}\n"
+        f"黑名单：{len(banned)}"
+    )
+
+async def admin_list(update: Update, ctx: ContextTypes):
+    if not is_admin(update.effective_user.id):
+        return
+    if not bot_db:
+        await update.message.reply_text("📭 无提取码")
+        return
+    lines = [f"{c}｜{p['name']}" for c,p in list(bot_db.items())[:50]]
+    await update.message.reply_text("\n".join(lines))
+
+async def admin_search(update: Update, ctx: ContextTypes):
+    if not is_admin(update.effective_user.id):
+        return
+    parts = update.message.text.split()
+    if len(parts) < 2:
+        await update.message.reply_text("/search 关键词")
+        return
+    w = parts[1].lower()
+    res = [c for c,p in bot_db.items() if w in p['name'].lower()]
+    await update.message.reply_text("\n".join(res[:20]) if res else "❌ 无结果")
+
+async def admin_del(update: Update, ctx: ContextTypes):
+    if not is_admin(update.effective_user.id):
+        return
+    parts = update.message.text.split()
+    if len(parts)<2:
+        await update.message.reply_text("/admindel 提取码")
+        return
+    code = parts[1]
+    if code in bot_db:
+        del bot_db[code]
+        save_json("bot_db.json",bot_db)
+        await update.message.reply_text(f"✅ 已删：{code}")
+    else:
+        await update.message.reply_text("❌ 不存在")
+
+async def ban_user(update: Update, ctx: ContextTypes):
+    if not is_admin(update.effective_user.id):
+        return
+    parts = update.message.text.split()
+    if len(parts)<2:
+        await update.message.reply_text("/ban 用户ID")
+        return
+    uid = parts[1]
+    if uid not in banned:
+        banned.append(uid)
+        save_json("banned.json",banned)
+    await update.message.reply_text(f"✅ 已封禁 {uid}")
+
+async def unban_user(update: Update, ctx: ContextTypes):
+    if not is_admin(update.effective_user.id):
+        return
+    parts = update.message.text.split()
+    if len(parts)<2:
+        await update.message.reply_text("/unban 用户ID")
+        return
+    uid = parts[1]
+    if uid in banned:
+        banned.remove(uid)
+        save_json("banned.json",banned)
+    await update.message.reply_text(f"✅ 已解封 {uid}")
+
+async def ban_list(update: Update, ctx: ContextTypes):
+    if not is_admin(update.effective_user.id):
+        return
+    await update.message.reply_text("\n".join(banned) if banned else "🚫 空")
 
 # ==================== 启动 ====================
 def main():
@@ -393,13 +481,21 @@ def main():
     app.add_handler(CommandHandler("del", del_code))
     app.add_handler(CommandHandler("confirm", confirm))
     app.add_handler(CommandHandler("skip", skip))
+    
     app.add_handler(CommandHandler("admin", admin))
+    app.add_handler(CommandHandler("stats", admin_stats))
+    app.add_handler(CommandHandler("list", admin_list))
+    app.add_handler(CommandHandler("search", admin_search))
+    app.add_handler(CommandHandler("admindel", admin_del))
+    app.add_handler(CommandHandler("ban", ban_user))
+    app.add_handler(CommandHandler("unban", unban_user))
+    app.add_handler(CommandHandler("banlist", ban_list))
 
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handle))
 
-    print("✅ 机器人启动成功")
+    print("✅ 机器人启动成功 —— 管理员面板已加载")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
@@ -407,4 +503,4 @@ if __name__ == "__main__":
         try:
             main()
         except:
-            time.sleep(5)
+            time.sleep(3)
