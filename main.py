@@ -34,13 +34,14 @@ def encrypt_metadata(metadata: dict) -> str:
     try:
         raw = json.dumps(metadata).encode("utf-8")
         encrypted = xor_data(raw, E2EE_KEY)
-        return base64.urlsafe_b64encode(encrypted).decode("utf-8")
+        return base64.urlsafe_b64encode(encrypted).decode("utf-8").replace("=", "")
     except Exception as e:
         print(f"加密失败: {e}")
         return ""
 
 def decrypt_metadata(encrypted_str: str) -> dict:
     try:
+        encrypted_str += "=" * ((4 - len(encrypted_str) % 4) % 4)
         raw = base64.urlsafe_b64decode(encrypted_str.encode("utf-8"))
         decrypted = xor_data(raw, E2EE_KEY)
         return json.loads(decrypted.decode("utf-8"))
@@ -116,16 +117,37 @@ def admin_menu():
 
 # ==================== 命令 ====================
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global BOT_SELF_ID
+    if BOT_SELF_ID is None:
+        me = await ctx.bot.get_me()
+        BOT_SELF_ID = me.id
+
+    args = ctx.args
+    if args:
+        token = args[0]
+        data = decrypt_metadata(token)
+        if data:
+            try:
+                await ctx.bot.forward_message(
+                    chat_id=update.effective_chat.id,
+                    from_chat_id=data["chat_id"],
+                    message_id=data["message_id"]
+                )
+                return
+            except Exception as e:
+                await update.message.reply_text("❌ 文件已失效或被删除")
+                return
+
     await update.message.reply_text("📦 TG云盘机器人（跨机器人永久版）\n/my 我的提取码\n/del 提取码")
 
-async def my_codes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def my_codes(update: Update, ctx: ContextTypes):
     uid = update.effective_user.id
     if is_banned(uid):
         return await update.message.reply_text("❌ 你已被封禁")
     items = [f"🔑 {c}｜{p['name']}" for c, p in bot_db.items() if str(p["uploader"]["id"]) == str(uid)]
     await update.message.reply_text("\n".join(items) if items else "📭 暂无文件")
 
-async def del_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def del_code(update: Update, ctx: ContextTypes):
     uid = update.effective_user.id
     args = update.message.text.split()
     if len(args) < 2:
@@ -139,8 +161,8 @@ async def del_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     save_json("bot_db.json", bot_db)
     await update.message.reply_text(f"✅ 提取码 {code} 已删除")
 
-# ==================== 上传：跨机器人永久存储版 ====================
-async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+# ==================== 上传：直接转发，不下载 ====================
+async def upload(update: Update, ctx: ContextTypes):
     global BOT_SELF_ID
     if BOT_SELF_ID is None:
         me = await ctx.bot.get_me()
@@ -159,9 +181,7 @@ async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # 转发到私密频道存储
         forwarded = await msg.forward(chat_id=int(STORE_CHAT_ID))
-        file_name = ""
         if msg.photo:
             file_name = f"IMG_{datetime.now().strftime('%H%M%S')}.jpg"
         elif msg.video:
@@ -169,7 +189,6 @@ async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif msg.document:
             file_name = msg.document.file_name or f"FILE_{datetime.now().strftime('%H%M%S')}"
 
-        # 加密存储：频道ID + message_id（跨机器人核心）
         metadata = {
             "chat_id": int(STORE_CHAT_ID),
             "message_id": forwarded.message_id,
@@ -181,7 +200,8 @@ async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             user_sessions[u.id] = []
         user_sessions[u.id].append({
             "meta_type": "perm_enc",
-            "data": enc
+            "data": enc,
+            "name": file_name
         })
 
         await msg.reply_text(
@@ -194,7 +214,7 @@ async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await msg.reply_text(f"❌ 上传失败：{str(e)[:80]}")
 
-async def confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def confirm(update: Update, ctx: ContextTypes):
     u = update.effective_user.id
     if u not in user_sessions or not user_sessions[u]:
         return await update.message.reply_text("❌ 暂无待打包文件")
@@ -215,9 +235,9 @@ async def confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "uploader": {"id": u, "name": update.effective_user.full_name}
     }
     del user_sessions[u]
-    await update.message.reply_text("📦 输入包名，或 /skip 跳过")
+    await update.message.reply_text("📦 输入包名，或 /skip 跳过命名")
 
-async def skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def skip(update: Update, ctx: ContextTypes):
     u = update.effective_user.id
     if u not in pending_naming:
         return await update.message.reply_text("❌ 无待打包任务")
@@ -230,8 +250,8 @@ async def skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     del pending_naming[u]
     await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
 
-# ==================== 提取：跨机器人永久可用 ====================
-async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+# ==================== 提取码 → 只发加密链接 ====================
+async def text_handle(update: Update, ctx: ContextTypes):
     global BOT_SELF_ID
     if BOT_SELF_ID is None:
         me = await ctx.bot.get_me()
@@ -296,43 +316,34 @@ async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
         return
 
-    # 提取码
+    # 6位提取码 → 只发加密链接，不发文件
     if len(txt) == 6:
         if txt not in bot_db:
             await update.message.reply_text("❌ 提取码不存在")
             return
         pkg = bot_db[txt]
-        await update.message.reply_text(f"📦 提取中：{pkg['name']}")
+        await update.message.reply_text(f"📦 {pkg['name']}")
 
-        for i, f in enumerate(pkg["files"], 1):
-            try:
-                # 永久跨机器人模式
-                if f.get("meta_type") == "perm_enc":
-                    data = decrypt_metadata(f["data"])
-                    if not data:
-                        await update.message.reply_text(f"⚠️ {i} 解密失败")
-                        continue
-                    cid = data["chat_id"]
-                    mid = data["message_id"]
-                    await ctx.bot.forward_message(
-                        chat_id=update.effective_chat.id,
-                        from_chat_id=cid,
-                        message_id=mid
-                    )
-            except Exception as e:
-                await update.message.reply_text(f"❌ {i} 发送失败")
+        me = await ctx.bot.get_me()
+        username = me.username
 
-        await update.message.reply_text(f"✅ 提取完成：{pkg['name']}")
+        for f in pkg["files"]:
+            token = f["data"]
+            name = f.get("name", "文件")
+            link = f"https://t.me/{username}?start={token}"
+            await update.message.reply_text(f"🔗 {name}\n{link}")
+
+        await update.message.reply_text("✅ 请点击链接获取文件")
         return
 
 # ==================== 管理员面板 ====================
-async def admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def admin(update: Update, ctx: ContextTypes):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("❌ 无权限")
         return
     await update.message.reply_text("👮 管理员面板", reply_markup=InlineKeyboardMarkup(admin_menu()))
 
-async def admin_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def admin_cb(update: Update, ctx: ContextTypes):
     q = update.callback_query
     await q.answer()
     if q.from_user.id != ADMIN_USER_ID:
@@ -364,14 +375,14 @@ async def admin_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         admin_ops[cid] = "ban"
         await q.edit_message_text("🚫 封禁/解封 ID", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="返回")]]))
 
-async def backup_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def backup_cmd(update: Update, ctx: ContextTypes):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("❌ 无权限")
         return
     auto_backup()
     await update.message.reply_text("✅ 备份完成")
 
-async def getdb_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def getdb_cmd(update: Update, ctx: ContextTypes):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("❌ 无权限")
         return
@@ -384,14 +395,14 @@ async def getdb_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ==================== 启动 ====================
 def main():
     if not BOT_TOKEN:
-        print("❌ 未设置 BOT_TOKEN")
+        print("❌ 未设置 TELEGRAM_BOT_TOKEN")
         exit(1)
     if not STORE_CHAT_ID:
         print("⚠️ 未设置 STORE_CHAT_ID，将无法保存文件")
     if ADMIN_USER_ID == 0:
         print("⚠️ 未设置 ADMIN_USER_ID")
 
-    app = ApplicationBuilder().token(BOT_TOKEN).connect_timeout(30).read_timeout(30).write_timeout(30).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).connect_timeout(30).read_timeout(60).write_timeout(60).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("my", my_codes))
@@ -406,12 +417,12 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handle))
 
-    print("✅ 机器人启动成功（跨机器人永久版）")
+    print("✅ 机器人启动成功（只发链接·防炸版）")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except:
-        time.sleep(5)
-        main()
+    while True:
+        try:
+            main()
+        except:
+            time.sleep(5)
