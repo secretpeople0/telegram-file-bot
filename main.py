@@ -174,8 +174,8 @@ async def upload(update: Update, ctx: ContextTypes):
         me = await ctx.bot.get_me()
         BOT_SELF_ID = me.id
 
-    u = update.effective_user
-    if is_banned(u.id) or u.id == BOT_SELF_ID:
+    u = update.effective_user.id
+    if is_banned(u) or u == BOT_SELF_ID:
         return
 
     msg = update.message
@@ -205,16 +205,16 @@ async def upload(update: Update, ctx: ContextTypes):
         }
         enc = encrypt_metadata(meta)
 
-        if u.id not in user_sessions:
-            user_sessions[u.id] = []
-        user_sessions[u.id].append({
+        if u not in user_sessions:
+            user_sessions[u] = []
+        user_sessions[u].append({
             "meta_type": "perm_enc",
             "data": enc,
             "name": name
         })
 
         await msg.reply_text(f"✅ 存储成功！\n📄 {name}\n💡 /confirm 打包 /skip 跳过")
-        await track(u.id, u.full_name, u.username)
+        await track(u, u.full_name, u.username)
 
     except Exception as e:
         await msg.reply_text(f"❌ 上传失败：{str(e)[:100]}")
@@ -265,6 +265,10 @@ async def button_callback(update: Update, ctx: ContextTypes):
     query = update.callback_query
     await query.answer()
 
+    if is_banned(query.from_user.id):
+        await query.answer("❌ 你已被封禁", show_alert=True)
+        return
+
     if query.data.startswith("get_"):
         token = query.data.replace("get_", "")
         data = decrypt_metadata(token)
@@ -292,7 +296,7 @@ async def text_handle(update: Update, ctx: ContextTypes):
     u = update.effective_user.id
     txt = update.message.text.strip()
 
-    if u == BOT_SELF_ID or is_banned(u.id):
+    if u == BOT_SELF_ID or is_banned(u):
         return
 
     if u in pending_naming:
@@ -318,7 +322,7 @@ async def text_handle(update: Update, ctx: ContextTypes):
             token = f.get("data", "")
             fname = f.get("name", "文件")
 
-            # ✅ 安全按钮：不跳转、不链接、不点 t.me
+            # 安全按钮：不跳转、不链接、不点 t.me
             keyboard = [[InlineKeyboardButton(f"📥 取「{fname}」", callback_data=f"get_{token}")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text(f"📄 {fname}", reply_markup=reply_markup)
