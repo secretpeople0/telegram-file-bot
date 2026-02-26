@@ -140,7 +140,7 @@ async def del_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     save_json("bot_db.json", bot_db)
     await update.message.reply_text(f"✅ {code} 已删除")
 
-# ==================== 上传：彻底修复版（用临时文件兼容API）====================
+# ==================== 上传：彻底修复版（上传后自动删除 .enc 消息）====================
 async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global BOT_SELF_ID
     if BOT_SELF_ID is None:
@@ -193,11 +193,17 @@ async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             read_timeout=30
         )
 
-        # 5. 清理临时文件
+        # 5. 立刻删除这条 .enc 文件消息（关键新增！）
+        await ctx.bot.delete_message(
+            chat_id=sent_msg.chat.id,
+            message_id=sent_msg.message_id
+        )
+
+        # 6. 清理临时文件
         os.unlink(temp_path)
         temp_path = None
 
-        # 6. 保存文件信息
+        # 7. 保存文件信息
         enc_fid = sent_msg.document.file_id
         obj = {
             "type": "enc",
