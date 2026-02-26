@@ -53,7 +53,6 @@ os.makedirs(BACKUP_DIR, exist_ok=True)
 
 user_sessions = {}
 pending_naming = {}
-admin_ops = {}
 
 def load_json(name):
     p = os.path.join(DATA_DIR, name)
@@ -261,7 +260,28 @@ async def skip(update: Update, ctx: ContextTypes):
     del pending_naming[u]
     await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
 
-# ==================== text_handle（最终修复版：按钮 + 链接双触发） ====================
+# ==================== 按钮回调：直接发文件（最安全） ====================
+async def button_callback(update: Update, ctx: ContextTypes):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data.startswith("get_"):
+        token = query.data.replace("get_", "")
+        data = decrypt_metadata(token)
+        if not data:
+            await query.edit_message_text("❌ 无效或已过期")
+            return
+
+        try:
+            await ctx.bot.forward_message(
+                chat_id=query.from_user.id,
+                from_chat_id=data["chat_id"],
+                message_id=data["message_id"]
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ 失败：{str(e)[:60]}")
+
+# ==================== text_handle（纯内部安全版） ====================
 async def text_handle(update: Update, ctx: ContextTypes):
     global bot_db
     global BOT_SELF_ID
@@ -272,10 +292,9 @@ async def text_handle(update: Update, ctx: ContextTypes):
     u = update.effective_user.id
     txt = update.message.text.strip()
 
-    if u == BOT_SELF_ID or is_banned(u):
+    if u == BOT_SELF_ID or is_banned(u.id):
         return
 
-    # 命名流程
     if u in pending_naming:
         pkg = pending_naming[u]
         pkg["name"] = txt[:50]
@@ -286,14 +305,11 @@ async def text_handle(update: Update, ctx: ContextTypes):
         await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
         return
 
-    # 输入6位提取码
     if len(txt) == 6:
         if txt not in bot_db:
             await update.message.reply_text("❌ 不存在")
             return
         pkg = bot_db[txt]
-        me_user = await ctx.bot.get_me()
-        username = me_user.username
         await update.message.reply_text(f"📦 {pkg['name']}")
 
         for f in pkg.get("files", []):
@@ -301,17 +317,11 @@ async def text_handle(update: Update, ctx: ContextTypes):
                 continue
             token = f.get("data", "")
             fname = f.get("name", "文件")
-            link = f"https://t.me/{username}?start={token}"
 
-            # ✅ 关键修复：发送 取件按钮 + 链接（禁用预览）
-            keyboard = [[InlineKeyboardButton(f"📥 点击取「{fname}」", url=link)]]
+            # ✅ 安全按钮：不跳转、不链接、不点 t.me
+            keyboard = [[InlineKeyboardButton(f"📥 取「{fname}」", callback_data=f"get_{token}")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(
-                f"🔗 {fname}\n{link}",
-                disable_web_page_preview=True,
-                reply_markup=reply_markup
-            )
-        await update.message.reply_text("✅ 点按钮即可取件，永不失效")
+            await update.message.reply_text(f"📄 {fname}", reply_markup=reply_markup)
         return
 
 # ==================== admin ====================
@@ -335,6 +345,7 @@ def main():
     app.add_handler(CommandHandler("skip", skip))
     app.add_handler(CommandHandler("admin", admin))
 
+    app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handle))
 
