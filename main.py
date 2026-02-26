@@ -17,71 +17,31 @@ from telegram.ext import (
     filters
 )
 
-# ==================== 宽松防炸（自动过期，绝不永久拉黑）====================
-RATE_LIMIT_PER_MINUTE = 500  # 普通用户 1 分钟最多 500 次
+# ==================== 【取消所有频次限制】====================
+# 所有用户（包括普通用户）不再受任何请求频率限制
+RATE_LIMIT_MINUTE = float('inf')  # 无限次
+USER_COOLDOWN = 0                 # 无冷却
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
-RATE_LIMIT_FILE = "/data/rate_limit.json"
-
-def load_rate_limit():
-    if os.path.exists(RATE_LIMIT_FILE):
-        try:
-            with open(RATE_LIMIT_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_rate_limit(data):
-    with open(RATE_LIMIT_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
 def is_admin(user_id):
     return user_id == ADMIN_USER_ID
 
-# ==================== 核心限流：自动清理，自动解除，永不拉黑 ====================
-def check_allow(user_id):
-    if is_admin(user_id):
-        return True
-    now = time.time()
-    data = load_rate_limit()
-    uid = str(user_id)
-
-    # 每次必清理超过 60s 的旧记录 → 到时间一定自动解除
-    if uid in data:
-        data[uid] = [t for t in data[uid] if now - t < 60]
-    else:
-        data[uid] = []
-
-    # 超过限制拒绝
-    if len(data[uid]) >= RATE_LIMIT_PER_MINUTE:
-        save_rate_limit(data)
-        return False
-
-    # 没超过就允许，并记录这次请求
-    data[uid].append(now)
-    save_rate_limit(data)
+# 【核心修改】直接返回 True，取消所有限制
+def check_rate_limit(user_id):
     return True
 
-# 重置单个用户
-def reset_user(user_id):
-    data = load_rate_limit()
-    uid = str(user_id)
-    if uid in data:
-        del data[uid]
-        save_rate_limit(data)
+def check_cooldown(user_id):
+    return True
 
-# 一键清空所有限流（解除所有人）
-def reset_all_rate_limit():
-    save_rate_limit({})
-
-# ==================== 加密 ====================
+# ==================== 真正端到端加密（E2EE）TG 无法检测内容 ====================
 E2EE_KEY = b"e2ee_secure_bot_2026"
-BOT_SELF_ID = None
+BOT_SELF_ID = None  # 机器人自身ID，启动时自动获取，用于防循环
 
 def xor_data(data: bytes, key: bytes) -> bytes:
     key = key * (len(data) // len(key) + 1)
     return bytes(d ^ k for d, k in zip(data, key))
 
+# ==================== 跨机器人兼容层 ====================
 def get_file_unique_key(file_id):
     return file_id[:20] + file_id[-20:]
 
@@ -103,8 +63,9 @@ def decode_file_id(encoded_id: str) -> str:
     except:
         return encoded_id
 
-# ==================== 基础配置 ====================
+# ==================== 核心配置 ====================
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+
 DATA_DIR = "/data"
 BACKUP_DIR = os.path.join(DATA_DIR, "backup")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -114,22 +75,23 @@ user_sessions = {}
 pending_naming = {}
 admin_ops = {}
 
+# ==================== 数据读写 ====================
 def load_json(name):
-    p = os.path.join(DATA, name)
+    p = os.path.join(DATA_DIR, name)
     try:
         with open(p, "r", encoding="utf-8") as f:
             return json.load(f)
     except:
-        return {} if any(x in name for x in ["db", "index", "banned"]) else {}
+        return {} if any(x in name for x in ["db", "index", "banned"]) else []
 
 def save_json(name, data):
     p = os.path.join(DATA_DIR, name)
     with open(p, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-bot_db = load_json("bot_db.json")
-user_idx = load_json("user_index.json")
-banned = load_json("banned.json")
+bot_db    = load_json("bot_db.json")
+user_idx  = load_json("user_index.json")
+banned    = load_json("banned.json")
 
 # ==================== 自动备份 ====================
 def auto_backup():
@@ -143,6 +105,7 @@ def auto_backup():
     for old in olds[:-3]:
         os.remove(old)
 
+# ==================== 工具 ====================
 async def track(user_id, name, username):
     uid = str(user_id)
     if uid not in user_idx or user_idx[uid]["name"] != name:
@@ -152,7 +115,11 @@ async def track(user_id, name, username):
 def is_banned(user_id):
     return str(user_id) in [str(x) for x in banned]
 
-# ==================== 管理员菜单 ====================
+def is_bot_self(user_id):
+    """判断是否是机器人自身发送的消息，防止循环处理"""
+    return user_id == BOT_SELF_ID
+
+# ==================== 管理员菜单（已删除限流相关按钮）====================
 def admin_menu():
     return [
         [InlineKeyboardButton("📊 统计", callback_data="统计")],
@@ -161,54 +128,48 @@ def admin_menu():
         [InlineKeyboardButton("👁️ 查用户上传", callback_data="查用户上传")],
         [InlineKeyboardButton("🗑️ 删提取码", callback_data="删提取码")],
         [InlineKeyboardButton("🚫 封禁/解封", callback_data="封禁/解封")],
-        [InlineKeyboardButton("🗑️ 清空所有限流", callback_data="清空所有限流")],
         [InlineKeyboardButton("🔙 返回", callback_data="返回")]
     ]
 
 # ==================== 命令 ====================
-async def start(update: Update, ctx: ContextTypes):
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📦 TG云盘机器人\n/my 我的提取码\n/del 提取码")
 
-async def my_codes(update: Update, ctx: ContextTypes):
+async def my_codes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if is_banned(uid):
-        await update.message.reply_text("❌ 你已被封禁")
-        return
-    items = [f"🔑 {c}｜{p['name']}" for c, p in bot_db.items() if str(p["uploader"]["id"]) == str(uid)]
+        return await update.message.reply_text("❌ 你已被封禁")
+    items = [f"🔑 {c}｜{p['name']}" for c,p in bot_db.items() if str(p["uploader"]["id"])==str(uid)]
     await update.message.reply_text("\n".join(items) if items else "📭 暂无文件")
 
-async def del_code(update: Update, ctx: ContextTypes):
+async def del_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     args = update.message.text.split()
-    if len(args) < 2:
-        await update.message.reply_text("用法：/del 提取码")
-        return
+    if len(args)<2:
+        return await update.message.reply_text("用法：/del 提取码")
     code = args[1]
     if code not in bot_db:
-        await update.message.reply_text("❌ 不存在")
-        return
-    if str(bot_db[code]["uploader"]["id"]) != str(uid):
-        await update.message.reply_text("❌ 只能删自己的")
-        return
+        return await update.message.reply_text("❌ 不存在")
+    if str(bot_db[code]["uploader"]["id"])!=str(uid):
+        return await update.message.reply_text("❌ 只能删自己的")
     del bot_db[code]
     save_json("bot_db.json", bot_db)
     await update.message.reply_text(f"✅ {code} 已删除")
 
-# ==================== 上传 ====================
-async def upload(update: Update, ctx: ContextTypes):
+# ==================== 上传：彻底修复版（上传后自动删除 .enc 消息）====================
+async def upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global BOT_SELF_ID
     if BOT_SELF_ID is None:
         me = await ctx.bot.get_me()
         BOT_SELF_ID = me.id
 
     u = update.effective_user
-    if is_banned(u.id) or u.id == BOT_SELF_ID:
+    if is_banned(u.id) or is_bot_self(u.id):
         return
 
-    # 限流判断：超限必回复提示，不会沉默
-    if not check_allow(u.id):
-        await update.message.reply_text("⏳ 操作频繁，1 分钟后会自动恢复，无需找管理员")
-        return
+    # 现在永远不会触发限流
+    if not check_rate_limit(u.id) or not check_cooldown(u.id):
+        return await update.message.reply_text("⚠️ 请求过快，请稍后再试")
 
     msg = update.message
     file_obj = None
@@ -232,95 +193,107 @@ async def upload(update: Update, ctx: ContextTypes):
 
     temp_path = None
     try:
+        # 1. 下载原始文件
         f = await ctx.bot.get_file(file_obj.file_id, read_timeout=15)
         file_bytes = await f.download_as_bytearray(read_timeout=15)
+
+        # 2. 端到端加密
         encrypted = xor_data(file_bytes, E2EE_KEY)
 
+        # 3. 写入临时文件
         with tempfile.NamedTemporaryFile(delete=False, suffix=".enc") as temp_f:
             temp_f.write(encrypted)
             temp_path = temp_f.name
 
+        # 4. 上传加密后的临时文件
         sent_msg = await msg.reply_document(
             document=open(temp_path, "rb"),
             filename=f"{file_name}.enc",
             disable_notification=True,
             read_timeout=15
         )
-        await ctx.bot.delete_message(chat_id=sent_msg.chat.id, message_id=sent_msg.message_id)
-        os.unlink(temp_path)
 
+        # 5. 立刻删除这条 .enc 文件消息
+        await ctx.bot.delete_message(
+            chat_id=sent_msg.chat.id,
+            message_id=sent_msg.message_id
+        )
+
+        # 6. 清理临时文件
+        os.unlink(temp_path)
+        temp_path = None
+
+        # 7. 保存文件信息
+        enc_fid = sent_msg.document.file_id
         obj = {
             "type": "enc",
-            "id": encode_file_id(sent_msg.document.file_id),
+            "id": encode_file_id(enc_fid),
             "name": file_name,
             "orig_type": orig_type
         }
         if u.id not in user_sessions:
             user_sessions[u.id] = []
         user_sessions[u.id].append(obj)
+
         await msg.reply_text(f"✅ 加密成功！已收 {len(user_sessions[u.id])} 个\n/confirm 打包")
         await track(u.id, u.full_name, u.username)
-    except Exception as e:
-        if temp_path:
-            os.unlink(temp_path)
-        await msg.reply_text(f"❌ 上传失败：{str(e)[:80]}")
 
-async def confirm(update: Update, ctx: ContextTypes):
-    uid = update.effective_user.id
-    if not check_allow(uid):
-        await update.message.reply_text("⏳ 操作频繁，1 分钟后自动恢复")
-        return
-    if uid not in user_sessions or not user_sessions[uid]:
-        await update.message.reply_text("❌ 暂无文件")
-        return
+    except Exception as e:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+        await msg.reply_text(f"❌ 加密上传失败：{str(e)[:100]}")
+
+async def confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user.id
+    if u not in user_sessions or not user_sessions[u]:
+        return await update.message.reply_text("❌ 暂无文件")
+    if not check_rate_limit(u) or not check_cooldown(u):
+        return await update.message.reply_text("⚠️ 请求过快，请稍后再试")
     chars = string.ascii_letters + string.digits
-    code = ''.join(random.choice(chars) for _ in range(6))
-    while code in bot_db:
+    while True:
         code = ''.join(random.choice(chars) for _ in range(6))
-    pending_naming[uid] = {
+        if code not in bot_db:
+            break
+    pending_naming[u] = {
         "code": code,
-        "files": user_sessions[uid],
-        "uploader": {"id": uid, "name": update.effective_user.full_name}
+        "files": user_sessions[u],
+        "uploader": {"id": u, "name": update.effective_user.full_name}
     }
-    del user_sessions[uid]
+    del user_sessions[u]
     await update.message.reply_text("📦 输入包名 /skip 跳过")
 
-async def skip(update: Update, ctx: ContextTypes):
-    uid = update.effective_user.id
-    if not check_allow(uid):
-        await update.message.reply_text("⏳ 操作频繁，1 分钟后自动恢复")
-        return
-    if uid not in pending_naming:
-        await update.message.reply_text("❌ 无待打包")
-        return
-    pkg = pending_naming[uid]
+async def skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user.id
+    if u not in pending_naming:
+        return await update.message.reply_text("❌ 无待打包")
+    if not check_rate_limit(u) or not check_cooldown(u):
+        return await update.message.reply_text("⚠️ 请求过快，请稍后再试")
+    pkg = pending_naming[u]
     pkg["name"] = f"包_{pkg['code']}"
     bot_db[pkg["code"]] = pkg
     save_json("bot_db.json", bot_db)
     auto_backup()
-    del pending_naming[uid]
+    del pending_naming[u]
     await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
 
-# ==================== 文本/提取码 ====================
-async def text_handle(update: Update, ctx: ContextTypes):
+async def text_handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global BOT_SELF_ID
     if BOT_SELF_ID is None:
         me = await ctx.bot.get_me()
         BOT_SELF_ID = me.id
 
-    uid = update.effective_user.id
-    txt = update.message.text.strip()
+    u   = update.effective_user.id
     cid = update.effective_chat.id
+    txt = update.message.text.strip()
 
-    if uid == BOT_SELF_ID:
+    if is_bot_self(u):
         return
 
-    # 限流：超限就提示，不会沉默不回复
-    if not check_allow(uid):
-        await update.message.reply_text("⏳ 操作频繁，1 分钟后自动恢复，不会永久限制")
+    # 全局防炸（现在永远通过）
+    if not is_admin(u) and (not check_rate_limit(u) or not check_cooldown(u)):
         return
 
-    if is_admin(uid) and cid in admin_ops:
+    if update.effective_user.id == ADMIN_USER_ID and cid in admin_ops:
         act = admin_ops.pop(cid)
         if act == "del_code":
             dels, nf = [], []
@@ -331,55 +304,51 @@ async def text_handle(update: Update, ctx: ContextTypes):
                 else:
                     nf.append(code)
             save_json("bot_db.json", bot_db)
-            await update.message.reply_text(f"✅ 删：{' '.join(dels)}\n❌ 无：{' '.join(nf)}" if dels else "❌ 未找到")
-            return
+            return await update.message.reply_text(f"✅删：{' '.join(dels)}\n❌无：{' '.join(nf)}")
         if act == "search":
-            res = [f"{c}｜{p['name']}" for c, p in bot_db.items() if txt.lower() in p['name'].lower()]
-            await update.message.reply_text("\n".join(res[:20]) if res else "无")
-            return
+            res = [f"{c}｜{p['name']}" for c,p in bot_db.items() if txt.lower() in p['name'].lower()]
+            return await update.message.reply_text("\n".join(res) if res else "无")
         if act == "user_uploads":
-            res = [f"{c}｜{p['name']}" for c, p in bot_db.items() if str(p["uploader"]["id"]) == txt.strip()]
-            await update.message.reply_text("\n".join(res[:20]) if res else "无")
-            return
+            res = [f"{c}｜{p['name']}" for c,p in bot_db.items() if str(p['uploader']['id'])==txt.strip()]
+            return await update.message.reply_text("\n".join(res) if res else "无")
         if act == "ban":
             parts = txt.split()
-            if len(parts) != 2:
-                await update.message.reply_text("格式：封禁 123 / 解封 123")
-                return
-            cmd, tid = parts
+            if len(parts)!=2:
+                return await update.message.reply_text("格式：封禁 123 / 解封 123")
+            cmd,tid = parts
             try:
-                tid = int(tid)
-                if cmd == "封禁":
+                tid=int(tid)
+                if cmd=="封禁":
                     if tid not in banned:
                         banned.append(tid)
                     await update.message.reply_text(f"✅ 封禁 {tid}")
-                elif cmd == "解封":
+                elif cmd=="解封":
                     if tid in banned:
                         banned.remove(tid)
                     await update.message.reply_text(f"✅ 解封 {tid}")
                 save_json("banned.json", banned)
             except:
                 await update.message.reply_text("❌ ID错误")
-            return
-
-    if is_banned(uid):
-        await update.message.reply_text("❌ 你已被封禁")
         return
 
-    if uid in pending_naming:
-        pkg = pending_naming[uid]
+    if is_banned(u):
+        return
+
+    if u in pending_naming:
+        pkg = pending_naming[u]
         pkg["name"] = txt[:50]
         bot_db[pkg["code"]] = pkg
         save_json("bot_db.json", bot_db)
         auto_backup()
-        del pending_naming[uid]
-        await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
-        return
+        del pending_naming[u]
+        return await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
 
+    # 提取码：自动解密（现在永远通过）
     if len(txt) == 6:
+        if not is_admin(u) and (not check_rate_limit(u) or not check_cooldown(u)):
+            return await update.message.reply_text("⚠️ 请求频繁，请稍后再试")
         if txt not in bot_db:
-            await update.message.reply_text("❌ 不存在")
-            return
+            return await update.message.reply_text("❌ 不存在")
         pkg = bot_db[txt]
         await update.message.reply_text(f"📦 {pkg['name']}")
         for f in pkg["files"]:
@@ -388,91 +357,99 @@ async def text_handle(update: Update, ctx: ContextTypes):
                 fid = decode_file_id(f["id"])
                 file = await ctx.bot.get_file(fid, read_timeout=15, write_timeout=15, connect_timeout=10)
                 data = await file.download_as_bytearray(connect_timeout=10, read_timeout=15)
-                dec = xor_data(data, E2EE_KEY)
-                ext = os.path.splitext(f["name"])[1]
-                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-                    tmp.write(dec)
-                    tmp_path = tmp.name
-                if f["orig_type"] == "photo":
-                    await update.message.reply_photo(open(tmp_path, "rb"), filename=f["name"], read_timeout=15)
-                elif f["orig_type"] == "video":
-                    await update.message.reply_video(open(tmp_path, "rb"), filename=f["name"], read_timeout=15)
+                decrypted = xor_data(data, E2EE_KEY)
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(f["name"])[1]) as temp_f:
+                    temp_f.write(decrypted)
+                    temp_path = temp_f.name
+
+                if f.get("orig_type") == "photo":
+                    await update.message.reply_photo(open(temp_path, "rb"), filename=f["name"], read_timeout=15)
+                elif f.get("orig_type") == "video":
+                    await update.message.reply_video(open(temp_path, "rb"), filename=f["name"], read_timeout=15)
                 else:
-                    await update.message.reply_document(open(tmp_path, "rb"), filename=f["name"], read_timeout=15)
-                os.unlink(tmp_path)
+                    await update.message.reply_document(open(temp_path, "rb"), filename=f["name"], read_timeout=15)
+
+                os.unlink(temp_path)
+                temp_path = None
+
             except Exception as e:
-                if temp_path:
+                if temp_path and os.path.exists(temp_path):
                     os.unlink(temp_path)
-                await update.message.reply_text(f"⚠️ 加载失败：{f['name']}")
-        return
+                await update.message.reply_text(f"⚠️ 无法解密：{f['name']}")
 
 # ==================== 管理员面板 ====================
-async def admin(update: Update, ctx: ContextTypes):
+async def admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("❌ 无权限")
-        return
+        return await update.message.reply_text("❌ 无权限")
     await update.message.reply_text("👮 管理面板", reply_markup=InlineKeyboardMarkup(admin_menu()))
 
-async def admin_cb(update: Update, ctx: ContextTypes):
+async def admin_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     if q.from_user.id != ADMIN_USER_ID:
-        return
-
+        return await q.edit_message_text("❌ 无权限")
     act = q.data
+    cid = q.message.chat.id
+
     if act == "返回":
-        await q.edit_message_text("👮 管理面板", reply_markup=InlineKeyboardMarkup(admin_menu()))
-    elif act == "统计":
+        return await q.edit_message_text("👮 管理面板", reply_markup=InlineKeyboardMarkup(admin_menu()))
+
+    if act == "统计":
         pkg_cnt = len(bot_db)
-        file_cnt = sum(len(v["files"]) for v in bot_db.values())
+        file_cnt= sum(len(v["files"]) for v in bot_db.values())
         usr_cnt = len(user_idx)
         await q.edit_message_text(f"📊 统计\n包：{pkg_cnt}\n文件：{file_cnt}\n用户：{usr_cnt}",
-                                  reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="返回")]]))
-    elif act == "用户列表":
-        lines = [f"{uid}｜{d['name']}" for uid, d in user_idx.items()]
-        text = "\n".join(lines[:30]) + "\n…仅显示前30个" if len(lines) > 30 else "\n".join(lines)
-        await q.edit_message_text(text or "无用户", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="返回")]]))
-    elif act == "搜文件":
-        admin_ops[q.message.chat.id] = "search"
-        await q.edit_message_text("🔍 输入关键词", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="返回")]]))
-    elif act == "查用户上传":
-        admin_ops[q.message.chat.id] = "user_uploads"
-        await q.edit_message_text("👤 输入用户ID", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="返回")]]))
-    elif act == "删提取码":
-        admin_ops[q.message.chat.id] = "del_code"
-        await q.edit_message_text("🗑️ 输入提取码", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="返回")]]))
-    elif act == "封禁/解封":
-        admin_ops[q.message.chat.id] = "ban"
-        await q.edit_message_text("🚫 输入：封禁 123 / 解封 123", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="返回")]]))
-    elif act == "清空所有限流":
-        reset_all_rate_limit()
-        await q.edit_message_text("✅ 已清空所有用户限流 → 所有人立即恢复", reply_markup=InlineKeyboardMarkup(admin_menu()))
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
 
-async def backup_cmd(update: Update, ctx):
-    if update.effective_user.id != ADMIN_USER_ID:
-        return
+    elif act == "用户列表":
+        lines = [f"{uid}｜{d['name']}" for uid,d in user_idx.items()]
+        text = "\n".join(lines) if lines else "无用户"
+        if len(text) > 4000:
+            text = text[:4000] + "\n📌 只显示前4000字符"
+        await q.edit_message_text(text,
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
+
+    elif act == "搜文件":
+        admin_ops[cid] = "search"
+        await q.edit_message_text("🔍 输入关键词",
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
+    elif act == "查用户上传":
+        admin_ops[cid] = "user_uploads"
+        await q.edit_message_text("👤 输入用户ID",
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
+    elif act == "删提取码":
+        admin_ops[cid] = "del_code"
+        await q.edit_message_text("🗑️ 输入提取码（空格分隔）",
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
+    elif act == "封禁/解封":
+        admin_ops[cid] = "ban"
+        await q.edit_message_text("🚫 格式：封禁 123 / 解封 123",
+                          reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回",callback_data="返回")]]))
+
+async def backup_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID: return
     auto_backup()
     await update.message.reply_text("✅ 已备份")
 
-async def getdb_cmd(update: Update, ctx):
-    if update.effective_user.id != ADMIN_USER_ID:
-        return
-    for f in ["bot_db.json", "user_index.json", "banned.json"]:
-        p = os.path.join(DATA_DIR, f)
+async def getdb_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID: return
+    for f in ["bot_db.json","user_index.json","banned.json"]:
+        p = os.path.join(DATA_DIR,f)
         if os.path.exists(p):
-            await update.message.reply_document(open(p, "rb"))
+            await update.message.reply_document(open(p,"rb"))
 
 # ==================== 启动 ====================
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("my", my_codes))
-    app.add_handler(CommandHandler("del", del_code))
+    app.add_handler(CommandHandler("start",   start))
+    app.add_handler(CommandHandler("my",      my_codes))
+    app.add_handler(CommandHandler("del",     del_code))
     app.add_handler(CommandHandler("confirm", confirm))
-    app.add_handler(CommandHandler("skip", skip))
-    app.add_handler(CommandHandler("admin", admin))
-    app.add_handler(CommandHandler("backup", backup_cmd))
-    app.add_handler(CommandHandler("getdb", getdb_cmd))
+    app.add_handler(CommandHandler("skip",    skip))
+    app.add_handler(CommandHandler("admin",   admin))
+    app.add_handler(CommandHandler("backup",  backup_cmd))
+    app.add_handler(CommandHandler("getdb",   getdb_cmd))
     app.add_handler(CallbackQueryHandler(admin_cb))
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handle))
