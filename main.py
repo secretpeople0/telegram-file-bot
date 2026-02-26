@@ -329,7 +329,12 @@ async def text_handle(update: Update, ctx: ContextTypes):
 
         for f in pkg["files"]:
             token = f["data"]
-            name = f.get("name", "文件")
+            # 优先从元数据中恢复文件名，确保兼容性
+            try:
+                data = decrypt_metadata(token)
+                name = data.get("name", f.get("name", "文件"))
+            except:
+                name = f.get("name", "文件")
             link = f"https://t.me/{username}?start={token}"
             await update.message.reply_text(f"🔗 {name}\n{link}")
 
