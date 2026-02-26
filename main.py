@@ -34,14 +34,14 @@ def encrypt_metadata(metadata: dict) -> str:
     try:
         raw = json.dumps(metadata).encode("utf-8")
         encrypted = xor_data(raw, E2EE_KEY)
-        return base64.urlsafe_b64encode(encrypted).decode("utf-8").replace("=", "")
+        return base64.urlsafe64encode(encrypted).decode("utf-8").replace("=", "")
     except:
         return ""
 
 def decrypt_metadata(encrypted_str: str) -> dict:
     try:
         encrypted_str += "=" * ((4 - len(encrypted_str) % 4) % 4)
-        raw = base64.urlsafe_b64decode(encrypted_str.encode("utf-8"))
+        raw = base64.urlsafe64decode(encrypted_str.encode("utf-8"))
         decrypted = xor_data(raw, E2EE_KEY)
         return json.loads(decrypted.decode("utf-8"))
     except:
@@ -233,7 +233,7 @@ async def confirm(update: Update, ctx: ContextTypes):
     chars = string.ascii_letters + string.digits
     code = None
     for _ in range(50):
-        candidate = ''.join(random.choice(chars, k=6))
+        candidate = ''.join(random.choice(chars) for _ in range(6))
         if candidate not in bot_db:
             code = candidate
             break
@@ -364,13 +364,13 @@ async def text_handle(update: Update, ctx: ContextTypes):
                 continue
             token = f.get("data", "")
             fname = f.get("name", "文件")
-            short_id = ''.join(random.choices(string.ascii_letters+string.digits,k=8))
+            short_id = ''.join(random.choices(string.ascii_letters+string.digits, k=8))
             id_to_token[short_id] = token
             kb = [[InlineKeyboardButton(f"📥 取 {fname}", callback_data=f"get_{short_id}")]]
             await update.message.reply_text(f"📄 {fname}", reply_markup=InlineKeyboardMarkup(kb))
         return
 
-# ==================== 管理员面板（完整版！不再空白） ====================
+# ==================== 管理员面板（增强优化版） ====================
 async def admin(update: Update, ctx: ContextTypes):
     uid = update.effective_user.id
     if not is_admin(uid):
@@ -382,10 +382,12 @@ async def admin(update: Update, ctx: ContextTypes):
         f"📦 总提取码：{len(bot_db)} 个\n"
         f"👤 总用户数：{len(user_idx)} 人\n"
         f"🚫 黑名单：{len(banned)} 人\n\n"
-        "管理员命令：\n"
+        "📌 管理员命令：\n"
         "/stats - 统计信息\n"
-        "/list - 全部提取码\n"
-        "/search 关键词 - 搜索提取码\n"
+        "/userlist - 查看所有用户ID\n"
+        "/userinfo 用户ID - 查看该用户上传的所有文件码+文件名\n"
+        "/list - 全部提取码+文件名\n"
+        "/search 关键词 - 搜索（显示 码+文件名）\n"
         "/admindel 码 - 强制删除\n"
         "/ban ID - 封禁用户\n"
         "/unban ID - 解封\n"
@@ -403,15 +405,47 @@ async def admin_stats(update: Update, ctx: ContextTypes):
         f"黑名单：{len(banned)}"
     )
 
+# 1. 查看所有用户ID
+async def admin_userlist(update: Update, ctx: ContextTypes):
+    if not is_admin(update.effective_user.id):
+        return
+    lines = [f"{uid}｜{info.get('name', '未知')}" for uid, info in user_idx.items()]
+    msg = "\n".join(lines) if lines else "👤 无用户"
+    if len(msg) > 4000:
+        msg = "\n".join(lines[:30]) + "\n...仅显示前30条"
+    await update.message.reply_text(msg)
+
+# 2. 查看单个用户上传的所有文件：提取码 + 文件名
+async def admin_userinfo(update: Update, ctx: ContextTypes):
+    if not is_admin(update.effective_user.id):
+        return
+    parts = update.message.text.split()
+    if len(parts) < 2:
+        await update.message.reply_text("用法：/userinfo 用户ID")
+        return
+    target_uid = parts[1]
+    found = []
+    for code, pkg in bot_db.items():
+        uploader = pkg.get("uploader", {})
+        uploader_id = str(uploader.get("id", ""))
+        if uploader_id == target_uid:
+            found.append(f"📦 {code}｜{pkg.get('name', '未命名')}")
+    if not found:
+        await update.message.reply_text("❌ 该用户无上传记录")
+        return
+    await update.message.reply_text("\n".join(found))
+
+# 3. 列出所有提取码 + 文件名
 async def admin_list(update: Update, ctx: ContextTypes):
     if not is_admin(update.effective_user.id):
         return
     if not bot_db:
         await update.message.reply_text("📭 无提取码")
         return
-    lines = [f"{c}｜{p['name']}" for c,p in list(bot_db.items())[:50]]
+    lines = [f"{code}｜{pkg.get('name', '未命名')}" for code, pkg in list(bot_db.items())[:50]]
     await update.message.reply_text("\n".join(lines))
 
+# 4. 搜索：显示 提取码+文件名
 async def admin_search(update: Update, ctx: ContextTypes):
     if not is_admin(update.effective_user.id):
         return
@@ -419,9 +453,16 @@ async def admin_search(update: Update, ctx: ContextTypes):
     if len(parts) < 2:
         await update.message.reply_text("/search 关键词")
         return
-    w = parts[1].lower()
-    res = [c for c,p in bot_db.items() if w in p['name'].lower()]
-    await update.message.reply_text("\n".join(res[:20]) if res else "❌ 无结果")
+    keyword = parts[1].lower()
+    res = []
+    for code, pkg in bot_db.items():
+        name = pkg.get("name", "").lower()
+        if keyword in name or keyword in code:
+            res.append(f"{code}｜{pkg.get('name', '未命名')}")
+    if not res:
+        await update.message.reply_text("❌ 无匹配结果")
+        return
+    await update.message.reply_text("\n".join(res[:30]))
 
 async def admin_del(update: Update, ctx: ContextTypes):
     if not is_admin(update.effective_user.id):
@@ -433,7 +474,7 @@ async def admin_del(update: Update, ctx: ContextTypes):
     code = parts[1]
     if code in bot_db:
         del bot_db[code]
-        save_json("bot_db.json",bot_db)
+        save_json("bot_db.json", bot_db)
         await update.message.reply_text(f"✅ 已删：{code}")
     else:
         await update.message.reply_text("❌ 不存在")
@@ -448,7 +489,7 @@ async def ban_user(update: Update, ctx: ContextTypes):
     uid = parts[1]
     if uid not in banned:
         banned.append(uid)
-        save_json("banned.json",banned)
+        save_json("banned.json", banned)
     await update.message.reply_text(f"✅ 已封禁 {uid}")
 
 async def unban_user(update: Update, ctx: ContextTypes):
@@ -461,7 +502,7 @@ async def unban_user(update: Update, ctx: ContextTypes):
     uid = parts[1]
     if uid in banned:
         banned.remove(uid)
-        save_json("banned.json",banned)
+        save_json("banned.json", banned)
     await update.message.reply_text(f"✅ 已解封 {uid}")
 
 async def ban_list(update: Update, ctx: ContextTypes):
@@ -484,6 +525,8 @@ def main():
     
     app.add_handler(CommandHandler("admin", admin))
     app.add_handler(CommandHandler("stats", admin_stats))
+    app.add_handler(CommandHandler("userlist", admin_userlist))
+    app.add_handler(CommandHandler("userinfo", admin_userinfo))
     app.add_handler(CommandHandler("list", admin_list))
     app.add_handler(CommandHandler("search", admin_search))
     app.add_handler(CommandHandler("admindel", admin_del))
@@ -495,7 +538,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handle))
 
-    print("✅ 机器人启动成功 —— 管理员面板已加载")
+    print("✅ 机器人启动成功 —— 管理员面板已增强")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
