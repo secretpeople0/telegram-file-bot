@@ -26,7 +26,7 @@ user_sessions = {}    # 存储待打包文件
 pending_naming = {}   # 存储待命名的提取码
 admin_operations = {} # 存储管理员的临时操作状态
 
-# ====================== 适配Render免费版 相对路径存储（修复权限报错） ======================
+# ====================== 适配Render免费版 相对路径存储 ======================
 DATA_DIR = "./data"
 BACKUP_DIR = os.path.join(DATA_DIR, "backup")
 
@@ -50,9 +50,9 @@ def save_json(filename, data):
     return True
 
 # 初始化持久化数据
-bot_db = load_json("bot_db.json")       # 提取码-文件包映射
-user_index = load_json("user_index.json") # 用户ID-用户信息映射
-banned_users = load_json("banned.json")  # 封禁列表
+bot_db = load_json("bot_db.json")
+user_index = load_json("user_index.json")
+banned_users = load_json("banned.json")
 
 # ====================== 自动备份功能 ======================
 last_backup_time = 0
@@ -80,7 +80,6 @@ def auto_backup():
 
 # ====================== 权限与用户追踪 ======================
 async def track_user(user_id: int, full_name: str, username: str):
-    """追踪用户，更新用户索引"""
     uid = str(user_id)
     if uid not in user_index or user_index[uid]["name"] != full_name:
         user_index[uid] = {
@@ -90,7 +89,6 @@ async def track_user(user_id: int, full_name: str, username: str):
         save_json("user_index.json", user_index)
 
 def is_banned(user_id: int) -> bool:
-    """检查是否被封禁"""
     return user_id in banned_users
 
 # ====================== 返回主菜单按钮 ======================
@@ -114,7 +112,7 @@ async def admin_panel(update: Update, _):
     keyboard = back_to_admin_menu()
     await update.message.reply_text("👮 管理菜单", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ====================== 管理员回调（含返回键） ======================
+# ====================== 管理员回调 ======================
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -125,7 +123,6 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     action = query.data
     chat_id = query.message.chat.id
 
-    # 返回菜单
     if action == "back_to_admin":
         await query.edit_message_text("👮 返回管理菜单", reply_markup=InlineKeyboardMarkup(back_to_admin_menu()))
         return
@@ -167,7 +164,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("🚫 格式：封禁 123 / 解封 123", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_to_admin")]]))
         admin_operations[chat_id] = "ban_user"
 
-# ====================== 管理员输入处理（支持批量删除） ======================
+# ====================== 管理员输入处理 ======================
 async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
@@ -231,7 +228,7 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except:
             await update.message.reply_text("❌ ID错误")
 
-# ====================== 用户查看自己的取件码 /my ======================
+# ====================== 用户查看自己取件码 ======================
 async def my_codes(update: Update, _):
     user_id = update.effective_user.id
     if is_banned(user_id):
@@ -246,7 +243,7 @@ async def my_codes(update: Update, _):
         return
     await update.message.reply_text("\n".join(my_list))
 
-# ====================== 用户删除自己的取件码 /del ======================
+# ====================== 用户删除自己取件码 ======================
 async def del_my_code(update: Update, _):
     user_id = update.effective_user.id
     args = update.message.text.split()
@@ -300,7 +297,7 @@ async def confirm_package(update: Update, _):
         await update.message.reply_text("❌ 无文件")
         return
 
-    # 新版：6位大小写+数字提取码
+    # 6位大小写+数字提取码
     chars = string.ascii_letters + string.digits
     while True:
         code = ''.join(random.choice(chars) for _ in range(6))
@@ -351,7 +348,7 @@ async def user_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ 提取码：{pkg['code']}")
         return
 
-    # 取件：支持旧数字码 + 新混合码
+    # 6位提取码取件
     if len(text) == 6:
         if text not in bot_db:
             await update.message.reply_text("❌ 不存在")
@@ -369,7 +366,7 @@ async def user_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 await update.message.reply_text(f"⚠️ 发送失败：{f['name']}")
 
-# ====================== 管理员备份 ======================
+# ====================== 管理员备份与数据库导出 ======================
 async def manual_backup(update: Update, _):
     if update.effective_user.id != ADMIN_USER_ID:
         return
@@ -384,7 +381,7 @@ async def send_db(update: Update, _):
         if os.path.exists(p):
             await update.message.reply_document(open(p,"rb"))
 
-# ====================== 启动（修复异步事件循环问题） ======================
+# ====================== 纯净无重复启动入口 ======================
 def main():
     async def run_bot():
         app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -399,7 +396,10 @@ def main():
         app.add_handler(CallbackQueryHandler(admin_callback_handler))
         app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, upload_file))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, user_text_handler))
+        
+        await app.initialize()
         await app.run_polling(allowed_updates=Update.ALL_TYPES)
+        await app.shutdown()
 
     asyncio.run(run_bot())
 
