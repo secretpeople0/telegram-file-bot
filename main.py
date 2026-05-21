@@ -3,6 +3,7 @@ import json
 import random
 import shutil
 import string
+import asyncio
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -383,21 +384,24 @@ async def send_db(update: Update, _):
         if os.path.exists(p):
             await update.message.reply_document(open(p,"rb"))
 
-# ====================== 启动 ======================
+# ====================== 启动（修复异步事件循环问题） ======================
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("my", my_codes))
-    app.add_handler(CommandHandler("del", del_my_code))
-    app.add_handler(CommandHandler("confirm", confirm_package))
-    app.add_handler(CommandHandler("skip", skip_naming))
-    app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(CommandHandler("backup", manual_backup))
-    app.add_handler(CommandHandler("getdb", send_db))
-    app.add_handler(CallbackQueryHandler(admin_callback_handler))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, upload_file))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, user_text_handler))
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    async def run_bot():
+        app = ApplicationBuilder().token(BOT_TOKEN).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("my", my_codes))
+        app.add_handler(CommandHandler("del", del_my_code))
+        app.add_handler(CommandHandler("confirm", confirm_package))
+        app.add_handler(CommandHandler("skip", skip_naming))
+        app.add_handler(CommandHandler("admin", admin_panel))
+        app.add_handler(CommandHandler("backup", manual_backup))
+        app.add_handler(CommandHandler("getdb", send_db))
+        app.add_handler(CallbackQueryHandler(admin_callback_handler))
+        app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, upload_file))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, user_text_handler))
+        await app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    asyncio.run(run_bot())
 
 if __name__ == "__main__":
     main()
